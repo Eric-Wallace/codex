@@ -134,7 +134,7 @@ class FairseqModel(Model):
     def encode_stop_words(self, stop_words: List[str]):
         return [self.lm_model.encode(token)[0:1].tolist() for token in stop_words]
 
-    def complete(self, prompt: str, stop_words: List[str], max_tokens=450, top_p=0.95, n=1, num_log_probs=1):
+    def complete(self, prompt: str, stop_words: List[str], max_tokens=450, top_p=0.95, n=1, num_log_probs=1, temperature=0.6):
         ''' This function runs fairseq LM locally but places the outputs into an json that looks just like the one
         provided by the OpenAI API. '''
         # need the topk score and token at each step
@@ -157,7 +157,7 @@ class FairseqModel(Model):
             # TODO, for some reason I can't get the sample() to actually return more than one candidaete
             lm_model.args.batch_size=n
             lm_model.args.required_batch_size_multiple=1
-            total_sequences = lm_model.sample(prompt, beam=1, max_len_a=1, max_len_b=max_tokens, nbest=1, sampling=True, sampling_topp=top_p, temperature=0.6)
+            total_sequences = lm_model.sample(prompt, beam=1, max_len_a=1, max_len_b=max_tokens, nbest=1, sampling=True, sampling_topp=top_p, temperature=temperature)
             total_sequences = collate_tokens([lm_model.encode(sentence) for sentence in total_sequences], pad_idx=pad_idx)
 
             fairseq_lm_model = lm_model.models[0]
@@ -235,6 +235,42 @@ class FairseqModel(Model):
         return return_json
 
 
+class CodeGPT2(Model):
+    def __init__(self, model_path='/private/home/fhs/models/pretrained/codemodels/code-gpt2/pytorch_model.bin'):
+        from transformers import GPT2LMHeadModel, AutoTokenizer
+        self.tokenizer = AutoTokenizer.from_pretrained('gpt2-xl')
+        model = GPT2LMHeadModel.from_pretrained('gpt2-xl')
+        model.config.max_length = model.config.n_positions 
+        model.config.pad_token_id = model.config.eos_token_id
+        state_dict = torch.load(model_path)
+        model.load_state_dict(state_dict)
+        # parallellize for multi-GPU training
+        n_devices = torch.cuda.device_count()
+        layers_per_device = model.config.n_layer // n_devices + 1
+        device_map = {k: [i for i in range(layers_per_device * k, min(layers_per_device * (k+1), model.config.n_layer))] for k in range(n_devices)}
+        model.parallelize(device_map)
+        self.model = model
+
+    def complete(self, prompt, stop_words, n=1, **kwargs):
+        # TODO: don't ignore stop words
+        if n != 1:
+            raise NotImplementedError()
+        inputs = self.tokenizer(prompt, return_tensors='pt').to(self.model.device)
+        if inputs.input_ids.shape[1] > self.model.config.max_length:
+            inputs = inputs[:,:self.model.config.max_length]
+        generation_output = self.model.generate(**inputs, return_dict_in_generate=True, **kwargs)
+        choices = []
+        for seq in generation_output['sequences']:
+            decoded = self.tokenizer.decode(seq.tolist())
+            decoded = decoded.replace('<|endoftext|>', '')
+            choices.append({
+                'text': decoded
+            })
+        # TODO: implement logprobs and other stuff or combine this with HFModel
+        return {
+            'choices': choices
+        }
+
 class OpenAIModel(Model):
     def __init__(self, engine='davinci-codex', persistent=True):
         self.engine = engine
@@ -243,7 +279,7 @@ class OpenAIModel(Model):
     def encode_stop_words(self, stop_words: List[str]):
         return stop_words
 
-    def complete(self, prompt, stop_words, **kwargs):
+    def complete(self, prompt, stop_words, top_p=0.95, temperature=0.6, **kwargs):
         succeeded = False
         tries = 0
         while not succeeded:
@@ -256,6 +292,8 @@ class OpenAIModel(Model):
                     prompt=prompt,
                     stop=stop_words,
                     logprobs=1,
+                    top_p=top_p,
+                    temperature=temperature,
                     **kwargs
                 )
                 succeeded = True
@@ -266,10 +304,15 @@ class OpenAIModel(Model):
                 time.sleep(CODEX_RETRY_DELAY_SECONDS)
         return response
 
-def make_model(model_name, tokenizer_name):
+def make_model(model_name, tokenizer_name, **kwargs):
     if 'davinci' in model_name or 'cushman' in model_name:
         return OpenAIModel(model_name, persistent=True)
     elif 'fairseq' in model_name:
         return FairseqModel(model_name)
+    elif model_name == 'code-gpt2':
+        d = {}
+        if 'model'
+        return CodeGPT2(**kwargs)
+        return 
     else:
         return HFModel(model_name, tokenizer_name)
