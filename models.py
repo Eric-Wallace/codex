@@ -279,7 +279,7 @@ class OpenAIModel(Model):
     def encode_stop_words(self, stop_words: List[str]):
         return stop_words
 
-    def complete(self, prompt, stop_words, top_p=0.95, temperature=0.6, **kwargs):
+    def complete(self, prompt, stop_words, max_tokens=450, top_p=0.95, temperature=0.6, **kwargs):
         succeeded = False
         tries = 0
         while not succeeded:
@@ -292,6 +292,7 @@ class OpenAIModel(Model):
                     prompt=prompt,
                     stop=stop_words,
                     logprobs=1,
+                    max_tokens=max_tokens,
                     top_p=top_p,
                     temperature=temperature,
                     **kwargs
@@ -304,15 +305,12 @@ class OpenAIModel(Model):
                 time.sleep(CODEX_RETRY_DELAY_SECONDS)
         return response
 
-def make_model(model_name, tokenizer_name, **kwargs):
+def make_model(model_name, tokenizer_name):
     if 'davinci' in model_name or 'cushman' in model_name:
         return OpenAIModel(model_name, persistent=True)
     elif 'fairseq' in model_name:
         return FairseqModel(model_name)
     elif model_name == 'code-gpt2':
-        d = {}
-        if 'model'
-        return CodeGPT2(**kwargs)
-        return 
+        return CodeGPT2()
     else:
         return HFModel(model_name, tokenizer_name)

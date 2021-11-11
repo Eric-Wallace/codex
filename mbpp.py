@@ -72,12 +72,11 @@ def evaluate_code_generic(model, output_path, verbose=False, num_candidates_gene
             text = item['text']
             test_setups = item['test_setup_code']
             test_cases = item['test_list']
-            new_function_name = None
-            prompt = generate_prompt(text, test_cases[0], new_function_name)
+            prompt = generate_prompt(text, test_cases[0])
 
             if num_candidates_evaluated != num_candidates_generated:
                 raise NotImplementedError()
-            response = model.complete(prompt, MBPP_STOP_WORDS, n=num_candidates_generated)
+            response = model.complete(prompt, MBPP_STOP_WORDS, n=num_candidates_generated, max_tokens=450)
             all_code = [choice['text'] for choice in response['choices']]
             for code_ix, code in enumerate(all_code):
                 this_attempts += 1

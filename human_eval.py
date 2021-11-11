@@ -68,7 +68,9 @@ if __name__ == "__main__":
                 prompt = prompt.split('>>>')[0].strip() + '\n    """'
         response = responses.get(task_id)
         completions, response = model.rank_completions(
-            prompt, HUMAN_EVAL_STOP_WORDS, num_responses=args.num_candidates_generated,
+            prompt, HUMAN_EVAL_STOP_WORDS,
+            max_tokens=450,
+            num_responses=args.num_candidates_generated,
             response=response,
             model_name=args.model_name
         )
