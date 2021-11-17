@@ -5,10 +5,6 @@ from typing import List
 
 from collections import namedtuple
 
-import openai
-from secret import API_KEY
-openai.api_key = API_KEY
-
 CODEX_RETRY_DELAY_SECONDS = 60
 CODEX_MAX_RETRIES = 30
 
@@ -78,22 +74,22 @@ class HFModel(Model):
             # create the return value to resemble OpenAI
             return_json = {}
             for batch_id in range(num_to_sample):
+                seq = total_sequences[batch_id][-max_tokens:]
                 curr_json = {}
 
                 # if you we find one of the stopwords, then we delete everything from the stopword on
                 curr_max_tokens = None
                 for stop_word_tensor in encoded_stop_words:
-                    if stop_word_tensor[0] in total_sequences[batch_id][-max_tokens:].tolist(): # if stopword is in the list
-                        possible_stop_index = total_sequences[batch_id][-max_tokens:].tolist().index(stop_word_tensor[0]) # get the position of stopword
-                        if possible_stop_index != -1 and total_sequences[batch_id][-max_tokens:].tolist()[possible_stop_index - 1] == 198: # 198 is the \n character. Assert that its in the position before the stopword
-                            if curr_max_tokens is None or possible_stop_index < curr_max_tokens: # save first occruene of stopword
-                                curr_max_tokens = possible_stop_index - 1 # -1 to also cut off \n
+                    for possible_stop_index in len(seq):
+                        if torch.allclose(seq[possible_stop_index:len(stop_word_tensor)], stop_word_tensor):
+                            if curr_max_tokens is None or possible_stop_index < curr_max_tokens: # save first occurrence of stopword
+                                curr_max_tokens = possible_stop_index
 
                 if curr_max_tokens is not None: # stopword is found, cut stuff off
-                    curr_json['text'] = self.lm_tokenizer.decode(total_sequences[batch_id][-max_tokens:-max_tokens + curr_max_tokens], skip_special_tokens=True)
+                    curr_json['text'] = self.lm_tokenizer.decode(seq[:curr_max_tokens], skip_special_tokens=True)
                 else:
                     print('no stopword found!') # not having the stopword found is probably a very bad sign
-                    curr_json['text'] = self.lm_tokenizer.decode(total_sequences[batch_id][-max_tokens:], skip_special_tokens=True)
+                    curr_json['text'] = self.lm_tokenizer.decode(seq, skip_special_tokens=True)
 
 
                 # fill the return json with the top tokens and probs to match the OpenAI return value.
@@ -132,7 +128,13 @@ class FairseqModel(Model):
         self.lm_model.eval().cuda() # TODO do half()
 
     def encode_stop_words(self, stop_words: List[str]):
-        return [self.lm_model.encode(token)[0:1].tolist() for token in stop_words]
+        encoded = []
+        for stop_word in stop_words:
+            # strip the EOS symbol
+            enc = self.lm_model.encode(stop_word)
+            assert enc[-1] == self.lm_model.src_dict.eos()
+            encoded.append(enc[:-1].tolist())
+        return encoded
 
     def complete(self, prompt: str, stop_words: List[str], max_tokens=450, top_p=0.95, n=1, num_log_probs=1, temperature=0.6):
         ''' This function runs fairseq LM locally but places the outputs into an json that looks just like the one
@@ -157,7 +159,10 @@ class FairseqModel(Model):
             # TODO, for some reason I can't get the sample() to actually return more than one candidaete
             lm_model.args.batch_size=n
             lm_model.args.required_batch_size_multiple=1
-            total_sequences = lm_model.sample(prompt, beam=1, max_len_a=1, max_len_b=max_tokens, nbest=1, sampling=True, sampling_topp=top_p, temperature=temperature)
+            total_sequences = lm_model.sample(
+                prompt, beam=1, max_len_a=1, max_len_b=max_tokens, nbest=1, sampling=True,
+                 sampling_topp=top_p, temperature=temperature
+                 )
             total_sequences = collate_tokens([lm_model.encode(sentence) for sentence in total_sequences], pad_idx=pad_idx)
 
             fairseq_lm_model = lm_model.models[0]
@@ -180,22 +185,24 @@ class FairseqModel(Model):
         return_json = {}
         for batch_id in range(len(prompt)):
             curr_json = {}
+
+            # remove EOS
+            seq = total_sequences[batch_id][-max_tokens-1:-1]
             
             # if you we find one of the stopwords, then we delete everything from the stopword on
             curr_max_tokens = None
-            # TODO, implement this for fairseq
-            #for stop_word_tensor in stop_words:
-            #    if stop_word_tensor[0] in total_sequences[batch_id][-max_tokens:].tolist(): # if stopword is in the list
-            #        possible_stop_index = total_sequences[batch_id][-max_tokens:].tolist().index(stop_word_tensor[0]) # get the position of stopword
-            #        if possible_stop_index != -1 and total_sequences[batch_id][-max_tokens:].tolist()[possible_stop_index - 1] == 198: # 198 is the \n character. Assert that its in the position before the stopword
-            #            if curr_max_tokens is None or possible_stop_index < curr_max_tokens: # save first occruene of stopword
-            #                curr_max_tokens = possible_stop_index - 1 # -1 to also cut off \n
+            for stop_word_tensor in encoded_stop_words:
+                for possible_stop_index in len(seq):
+                    if torch.allclose(seq[possible_stop_index:len(stop_word_tensor)], stop_word_tensor):
+                        if curr_max_tokens is None or possible_stop_index < curr_max_tokens: # save first occurrence of stopword
+                            curr_max_tokens = possible_stop_index
+
 
             if curr_max_tokens is not None: # stopword is found, cut stuff off
-                curr_json['text'] = lm_model.decode(total_sequences[batch_id][-max_tokens-1:-max_tokens + curr_max_tokens])
+                curr_json['text'] = lm_model.decode(seq[:curr_max_tokens])
             else:
                 print('no stopword found!') # not having the stopword found is probably a very bad sign
-                curr_json['text'] = lm_model.decode(total_sequences[batch_id][-max_tokens-1:-1])
+                curr_json['text'] = lm_model.decode(seq)
 
             if curr_max_tokens is None: # no stopword
                 curr_top_log_probs = top_log_probs[batch_id][:-1]
@@ -272,6 +279,7 @@ class CodeGPT2(Model):
         }
 
 class OpenAIModel(Model):
+
     def __init__(self, engine='davinci-codex', persistent=True):
         self.engine = engine
         self.persistent = persistent
@@ -280,6 +288,10 @@ class OpenAIModel(Model):
         return stop_words
 
     def complete(self, prompt, stop_words, max_tokens=450, top_p=0.95, temperature=0.6, **kwargs):
+        import openai
+        from secret import API_KEY
+        openai.api_key = API_KEY
+
         succeeded = False
         tries = 0
         while not succeeded:
