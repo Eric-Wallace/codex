@@ -70,9 +70,7 @@ if __name__ == "__main__":
         completions, response = model.rank_completions(
             prompt, HUMAN_EVAL_STOP_WORDS,
             max_tokens=450,
-            num_responses=args.num_candidates_generated,
-            response=response,
-            model_name=args.model_name
+            n=args.num_candidates_generated,
         )
         responses[task_id] = response
         for score, candidate in completions[:args.num_candidates_evaluated]:
