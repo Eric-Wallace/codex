@@ -16,10 +16,22 @@ class Model:
     def complete(self, prompt: str, stop_words: List[str], **kwargs):
         raise NotImplementedError()
 
-    def rank_completions(self, prompt: str, stop_words: List[str], **kwargs):
-        response = self.complete(prompt, stop_words, **kwargs)
+    def rank_completions(self, prompt: str, stop_words: List[str], cached_response=None, scoring='mean', **kwargs):
+        assert scoring in ['mean', 'sum']
+        if cached_response is None:
+            response = self.complete(prompt, stop_words, **kwargs)
+        else:
+            response = cached_response
+        def scoring_fn(token_logprobs):
+            token_logprobs = np.array(token_logprobs)
+            if scoring =='mean':
+                return token_logprobs.mean()
+            elif scoring == 'sum':
+                return token_logprobs.sum()
+            else:
+                raise NotImplementedError(f"scoring {scoring}")
         scored_choices = [
-            (np.array(choice['logprobs']['token_logprobs']).mean(), choice['text'])
+            (scoring_fn(choice['logprobs']['token_logprobs']), choice['text'])
             for choice in response['choices']
         ]
         return list(sorted(scored_choices, reverse=True)), response
@@ -121,7 +133,7 @@ class HFModel(Model):
         return return_json
 
 class FairseqModel(Model):
-    def __init__(self, model_path: str, bpe="gpt2_pretokenization_newlines_only", gpt2_encoder_json=None, gpt2_vocab_bpe=None):
+    def __init__(self, model_path: str, bpe="gpt2_pretokenization_newlines_only", gpt2_encoder_json=None, gpt2_vocab_bpe=None, prompt_prefix=None):
         self.bpe = bpe
         assert bpe in ["gpt2_pretokenization_newlines_only", "gpt2"], f"invalid bpe type {bpe}"
         if not model_path.endswith(".pt"):
@@ -138,6 +150,7 @@ class FairseqModel(Model):
             model_root_dir, model_basename, bpe=bpe, gpt2_encoder_json=gpt2_encoder_json, gpt2_vocab_bpe=gpt2_vocab_bpe
             )
         self.lm_model.eval().cuda() # TODO do half()
+        self.prompt_prefix = prompt_prefix
 
     def encode_stop_words(self, stop_words: List[str]):
         # TODO: I don't think this is needed anymore
@@ -153,43 +166,27 @@ class FairseqModel(Model):
     def complete(self, prompt: str, stop_words: List[str], max_tokens=450, top_p=0.95, n=1, num_log_probs=1, temperature=0.6):
         ''' This function runs fairseq LM locally but places the outputs into an json that looks just like the one
         provided by the OpenAI API. '''
-        # need the topk score and token at each step
-        # from fairseq.data.data_utils import collate_tokens
-        # from fairseq import utils
 
         if num_log_probs != 1:
             raise NotImplementedError()
 
-        # encoded_stop_words = self.encode_stop_words(stop_words)
         lm_model = self.lm_model
 
-        # pad_idx, eos_idx, bos_idx = lm_model.src_dict.pad(), lm_model.src_dict.eos(), lm_model.src_dict.bos()
+        stop_words = stop_words + ["<| ", "<|/ ", "<code>", "</code>", "<cell>", "</cell>"]
 
-        # greedily generate l tokens
-        # the generate function can handle left padded inputs automatically in HF
-        # total_sequences is now the input + possible generated output
+        if self.prompt_prefix is not None:
+            # TODO: add option to not insert newline
+            prompt = f"{self.prompt_prefix}\n{prompt}"
+
         choices = []
         with torch.no_grad():
-            # TODO, for some reason I can't get the sample() to actually return more than one candidaete
-            # lm_model.args.batch_size=n
-            # lm_model.args.required_batch_size_multiple=1
-            # total_sequences = lm_model.sample(
-            #     prompt, beam=1, max_len_a=1, max_len_b=max_tokens, nbest=1, sampling=True,
-            #      sampling_topp=top_p, temperature=temperature
-            #      )
-            # total_sequences = collate_tokens([lm_model.encode(sentence) for sentence in total_sequences], pad_idx=pad_idx)
-
-            # fairseq_lm_model = lm_model.models[0]
-            # with utils.model_eval(fairseq_lm_model):
-            #     logits, extra = fairseq_lm_model(
-            #         total_sequences.to(device=lm_model.device),
-            #         return_all_hiddens=False,
-            #     )
             lm_model.cfg.generation['max_len_b'] = max_tokens
             encoded_prompt = lm_model.encode(prompt)
 
             prompt_len = len(encoded_prompt)
 
+            # greedily generate l tokens
+            # total_sequences is now the input + possible generated output
             # beam is actually just the num of candidates to sample, when sampling=True
             completions = lm_model.generate([encoded_prompt], sampling=True, sampling_topp=top_p, temperature=temperature, beam=n)
             # batch size 1
@@ -198,14 +195,6 @@ class FairseqModel(Model):
             all_tokens = [completion['tokens'][prompt_len-1:-1] for completion in completions]
             # TODO: these scores are post-temperature-scaling log probs. is this consistent with HF and codex?
             all_logprobs = [completion['positional_scores'][prompt_len-1:-1] for completion in completions]
-
-        # -1 for eos token
-        # get the top tokens and probs for the context and the generated l tokens
-        # probs = torch.softmax(logits[:,-max_tokens-1-1:-1], dim=2).cpu()
-
-        # top_probs, top_tokens = torch.topk(probs, k=num_log_probs)
-        # logprobs = torch.log(probs)
-        # top_log_probs = torch.log(top_probs)
 
         # construct batched tokens
         # create the return value to resemble OpenAI
@@ -244,37 +233,14 @@ class FairseqModel(Model):
 
             curr_json['text'] = seq_decoded
             
-            # if curr_max_tokens is None: # no stopword
-            #     curr_top_log_probs = top_log_probs[batch_id][:-1]
-            #     curr_top_tokens = top_tokens[batch_id][:-1]
-            # else:
-            #     curr_top_log_probs = top_log_probs[batch_id][:curr_max_tokens-1]
-            #     curr_top_tokens = top_tokens[batch_id][:curr_max_tokens-1]
         
             # fill the return json with the top tokens and probs to match the OpenAI return value.
             curr_json['logprobs'] = {}
-            # curr_json['logprobs']['top_logprobs'] = []
             curr_json['logprobs']['token_logprobs'] = logprobs.tolist() 
             curr_json['logprobs']['tokens'] = [lm_model.decode([ix]) for ix in seq]
-            # for index, (current_element_top_log_probs, current_element_top_tokens) in enumerate(zip(curr_top_log_probs, curr_top_tokens)):
-            #     # skip padding tokens
-            #     if current_element_top_tokens[0].item() == pad_idx or current_element_top_tokens[0].item() == eos_idx:
-            #         continue
-            #     temp = {}
-            #     for log_prob, token in zip(current_element_top_log_probs, current_element_top_tokens):
-            #         try:
-            #             temp[lm_model.decode(token.unsqueeze(0))] = log_prob.item()
-            #         except:
-            #             # madeupwords
-            #             print('warning made up words')
-            #             temp[lm_model.string(token.unsqueeze(0))] = log_prob.item()
-            #     curr_json['logprobs']['top_logprobs'].append(temp)
 
-            # for index in range(len(probs[batch_id])):
-            #     curr_json['logprobs']['tokens'].append(lm_model.decode(total_sequences[batch_id][index].unsqueeze(0)))
-            # for index, log_probs_token_position_j in enumerate(logprobs[batch_id][:-1]):
-            #     # probs are left shifted for LMs
-            #     curr_json['logprobs']['token_logprobs'].append(log_probs_token_position_j[total_sequences[batch_id][index]])
+            # TODO: add top_logprobs
+            # top_logprobs is a list of dicts for the top K tokens. with each entry being {'token_name': log_prob}
 
             choices.append(curr_json)
 
@@ -357,12 +323,18 @@ class OpenAIModel(Model):
                 time.sleep(CODEX_RETRY_DELAY_SECONDS)
         return response
 
-def make_model(model_name, tokenizer_name):
+def make_model(model_name, tokenizer_name, prompt_prefix=None):
     if 'davinci' in model_name or 'cushman' in model_name:
+        if prompt_prefix is not None:
+            raise NotImplementedError()
         return OpenAIModel(model_name, persistent=True)
     elif 'fairseq' or '/checkpoint' in model_name:
-        return FairseqModel(model_name)
+        return FairseqModel(model_name, prompt_prefix=prompt_prefix)
     elif model_name == 'code-gpt2':
+        if prompt_prefix is not None:
+            raise NotImplementedError()
         return CodeGPT2()
     else:
+        if prompt_prefix is not None:
+            raise NotImplementedError()
         return HFModel(model_name, tokenizer_name)
