@@ -37,7 +37,9 @@ class Model:
         return list(sorted(scored_choices, reverse=True)), response
 
 class HFModel(Model):
-    def __init__(self, model_name, tokenizer_name=None):
+    def __init__(self, model_name, tokenizer_name=None, prompt_prefix=None):
+        if prompt_prefix is not None:
+            raise NotImplementedError("--prompt_prefix for HFModel")
         from transformers import AutoModelForCausalLM, AutoTokenizer
         self.lm_model = AutoModelForCausalLM.from_pretrained(model_name)
         self.lm_model.eval().cuda() # TODO do half()
@@ -145,12 +147,16 @@ class FairseqModel(Model):
         if gpt2_vocab_bpe is None:
             gpt2_vocab_bpe = os.path.join(model_root_dir, "merges.txt")
 
+        self.gpt2_encoder_json = gpt2_encoder_json
+        self.gpt2_vocab_bpe = gpt2_vocab_bpe
+
         from fairseq.models.transformer_lm import TransformerLanguageModel
         self.lm_model = TransformerLanguageModel.from_pretrained(
             model_root_dir, model_basename, bpe=bpe, gpt2_encoder_json=gpt2_encoder_json, gpt2_vocab_bpe=gpt2_vocab_bpe
             )
         self.lm_model.eval().cuda() # TODO do half()
         self.prompt_prefix = prompt_prefix
+
 
     def encode_stop_words(self, stop_words: List[str]):
         # TODO: I don't think this is needed anymore
@@ -163,6 +169,16 @@ class FairseqModel(Model):
             encoded.append(enc[:-1].tolist())
         return encoded
 
+    @property
+    def _extra_stop_words(self):
+        return ["<| ", "<|/ ", "<code>", "</code>", "<cell>", "</cell>"]
+
+    def _encode(self, text: str) -> torch.tensor:
+        return self.lm_model.encode(text)
+
+    def _decode(self, tokens: torch.tensor) -> str:
+        return self.lm_model.decode(tokens)
+
     def complete(self, prompt: str, stop_words: List[str], max_tokens=450, top_p=0.95, n=1, num_log_probs=1, temperature=0.6):
         ''' This function runs fairseq LM locally but places the outputs into an json that looks just like the one
         provided by the OpenAI API. '''
@@ -172,7 +188,7 @@ class FairseqModel(Model):
 
         lm_model = self.lm_model
 
-        stop_words = stop_words + ["<| ", "<|/ ", "<code>", "</code>", "<cell>", "</cell>"]
+        stop_words = stop_words + self._extra_stop_words
 
         if self.prompt_prefix is not None:
             # TODO: add option to not insert newline
@@ -181,7 +197,8 @@ class FairseqModel(Model):
         choices = []
         with torch.no_grad():
             lm_model.cfg.generation['max_len_b'] = max_tokens
-            encoded_prompt = lm_model.encode(prompt)
+
+            encoded_prompt = self._encode(prompt)
 
             prompt_len = len(encoded_prompt)
 
@@ -209,7 +226,7 @@ class FairseqModel(Model):
             assert len(full_seq) == len(full_logprobs)
 
             # search for stopwords, to truncate after them
-            full_seq_decoded = lm_model.decode(full_seq)
+            full_seq_decoded = self._decode(full_seq)
             min_index = None
             for stop_word in stop_words:
                 index = full_seq_decoded.find(stop_word)
@@ -224,7 +241,7 @@ class FairseqModel(Model):
                 # figure out how many tokens to take from log probs by reencoding the truncated string
                 # TODO: this may not exactly be right since this I don't think BPE is a prefix code
                 # -1 to remove EOS
-                seq = lm_model.encode(seq_decoded)[:-1]
+                seq = self._encode(seq_decoded)[:-1]
                 logprobs = full_logprobs[:len(seq)]
             else:
                 print('no stopword found!') # not having any stopword found is probably a very bad sign
@@ -237,7 +254,7 @@ class FairseqModel(Model):
             # fill the return json with the top tokens and probs to match the OpenAI return value.
             curr_json['logprobs'] = {}
             curr_json['logprobs']['token_logprobs'] = logprobs.tolist() 
-            curr_json['logprobs']['tokens'] = [lm_model.decode([ix]) for ix in seq]
+            curr_json['logprobs']['tokens'] = [self._decode([ix]) for ix in seq]
 
             # TODO: add top_logprobs
             # top_logprobs is a list of dicts for the top K tokens. with each entry being {'token_name': log_prob}
@@ -247,9 +264,50 @@ class FairseqModel(Model):
         return_json['choices'] = choices
         return return_json
 
+class CausalMasking(FairseqModel):
+    EOSS = "<eoss>"
+
+    TOKENIZER_OFFSET = 4
+
+    @staticmethod
+    def make_sentinel(i):
+        return f"<sentinel:{i}>"
+
+    @property
+    def _sentinel_tokens(self):
+        return [CausalMasking.make_sentinel(i) for i in range(256)]
+
+    @property
+    def _special_tokens(self):
+        return self._sentinel_tokens + [self.EOSS]
+
+    @property
+    def _extra_stop_words(self):
+        return super()._extra_stop_words + self._special_tokens
+
+    def __init__(self, model_path: str, bpe="gpt2_pretokenization_newlines_only", gpt2_encoder_json=None, gpt2_vocab_bpe=None, prompt_prefix=None):
+        super().__init__(model_path, bpe, gpt2_encoder_json, gpt2_vocab_bpe, prompt_prefix)
+        assert bpe in {"gpt2_pretokenization_newlines_only", "bpe"}
+        from tokenizers import ByteLevelBPETokenizer
+        self.tokenizer = tokenizer = ByteLevelBPETokenizer.from_file(
+            # these will be set by super().__init__
+            self.gpt2_encoder_json, self.gpt2_vocab_bpe,
+            pretokenizer_split_newlines_only=(bpe=="gpt2_pretokenization_newlines_only"),
+        )
+        tokenizer.add_special_tokens(self._special_tokens)
+
+    def _encode(self, text):
+        return torch.tensor(self.tokenizer.encode(text).ids) + self.TOKENIZER_OFFSET
+
+    def _decode(self, tokens):
+        token_ids = torch.tensor(tokens)
+        return self.tokenizer.decode((token_ids - self.TOKENIZER_OFFSET).tolist(), skip_special_tokens=False)
+
 
 class CodeGPT2(Model):
-    def __init__(self, model_path='/private/home/fhs/models/pretrained/codemodels/code-gpt2/pytorch_model.bin'):
+    def __init__(self, model_path='/private/home/fhs/models/pretrained/codemodels/code-gpt2/pytorch_model.bin', prompt_prefix=None):
+        if prompt_prefix is not None:
+            raise NotImplementedError("--prompt_prefix for CodeGPT2")
         from transformers import GPT2LMHeadModel, AutoTokenizer
         self.tokenizer = AutoTokenizer.from_pretrained('gpt2-xl')
         model = GPT2LMHeadModel.from_pretrained('gpt2-xl')
@@ -286,7 +344,9 @@ class CodeGPT2(Model):
 
 class OpenAIModel(Model):
 
-    def __init__(self, engine='davinci-codex', persistent=True):
+    def __init__(self, engine='davinci-codex', persistent=True, prompt_prefix=None):
+        if prompt_prefix is not None:
+            raise NotImplementedError("--prompt_prefix for OpenAIModel")
         self.engine = engine
         self.persistent = persistent
 
@@ -329,7 +389,12 @@ def make_model(model_name, tokenizer_name, prompt_prefix=None):
             raise NotImplementedError()
         return OpenAIModel(model_name, persistent=True)
     elif 'fairseq' or '/checkpoint' in model_name:
-        return FairseqModel(model_name, prompt_prefix=prompt_prefix)
+        if 'cm-' in model_name:
+            return CausalMasking(model_name, prompt_prefix=prompt_prefix)
+        elif 'lm-' in model_name:
+            return FairseqModel(model_name, prompt_prefix=prompt_prefix)
+        else:
+            raise ValueError(f"couldn't guess model type from {model_name}")
     elif model_name == 'code-gpt2':
         if prompt_prefix is not None:
             raise NotImplementedError()
