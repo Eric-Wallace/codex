@@ -26,6 +26,9 @@ if __name__ == "__main__":
     parser.add_argument("--cached_responses", action='store_true')
     parser.add_argument("--remove_test_cases", default=False, action='store_true')
 
+    parser.add_argument("--temperature", type=float, default=0.6)
+    parser.add_argument("--top_p", type=float, default=0.95)
+
     parser.add_argument("--prompt_prefix")
     parser.add_argument("--candidate_scoring", choices=["mean", "sum"], default="mean")
 
@@ -84,6 +87,8 @@ if __name__ == "__main__":
             # if we've cached responses, use the cached
             cached_response=responses.get(task_id) if args.cached_responses else None,
             scoring=args.candidate_scoring,
+            temperature=args.temperature,
+            top_p=args.top_p,
         )
         responses[task_id] = response
         for score, candidate in completions[:args.num_candidates_evaluated]:

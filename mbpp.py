@@ -44,7 +44,7 @@ class Command(object):
 def generate_prompt(description, test_example):
     return f'"""\n{description}\n{test_example}\n"""'
 
-def evaluate_code_generic(model, output_path, verbose=False, num_candidates_generated=15, num_candidates_evaluated=15):
+def evaluate_code_generic(args, model):
     """
     prompt_completion_function should be prompt function of the sort: lambda prompt: str -> {
         ...,
@@ -56,6 +56,10 @@ def evaluate_code_generic(model, output_path, verbose=False, num_candidates_gene
         ...
     }
     """
+    num_candidates_generated = args.num_candidates_generated
+    num_candidates_evaluated = args.num_candidates_evaluated
+    output_path = args.output_path
+
     tempdir = tempfile.TemporaryDirectory(prefix='mbpp-eval')
     # this will be used temporarily for all solutions
     code_path = f'{tempdir.name}/code.py'
@@ -76,9 +80,13 @@ def evaluate_code_generic(model, output_path, verbose=False, num_candidates_gene
 
             if num_candidates_evaluated != num_candidates_generated:
                 raise NotImplementedError()
-            response = model.complete(prompt, MBPP_STOP_WORDS, n=num_candidates_generated, max_tokens=450)
+            response = model.complete(
+                prompt, MBPP_STOP_WORDS, n=num_candidates_generated, max_tokens=450,
+                temperature=args.temperature, top_p=args.top_p,
+            )
             all_code = [choice['text'] for choice in response['choices']]
             for code_ix, code in enumerate(all_code):
+                verbose = args.verbose and (args.verbose_candidates is None or code_ix < args.verbose_candidates)
                 this_attempts += 1
                 if verbose:
                     print(f"PROBLEM {i} ATTEMPT {this_attempts}")
@@ -126,6 +134,8 @@ def evaluate_code_generic(model, output_path, verbose=False, num_candidates_gene
                 problems_passed += 1
             total_problems += 1
             bar.set_description(f'ps: {problems_passed / total_problems * 100:.1f}%; as: {successes/attempts*100:.1f}%')
+            if args.verbose:
+                print(f'ps: {problems_passed / total_problems * 100:.1f}%; as: {successes/attempts*100:.1f}%')
         tempdir.cleanup()
     except KeyboardInterrupt:
         tempdir.cleanup()
@@ -142,11 +152,19 @@ if __name__ == '__main__':
     parser.add_argument("--num_candidates_generated", type=int, default=15)
     parser.add_argument("--num_candidates_evaluated", type=int, default=15)
     parser.add_argument('--verbose', action='store_true')
+    parser.add_argument('--verbose_candidates', type=int, default=5)
+
+    parser.add_argument("--temperature", type=float, default=0.6)
+    parser.add_argument("--top_p", type=float, default=0.95)
+
+    parser.add_argument("--prompt_prefix")
+    parser.add_argument("--candidate_scoring", choices=["mean", "sum"], default="mean")
+
     args = parser.parse_args()
 
     random.seed(1)
 
     dataset = MBPPDataset()
 
-    model = make_model(args.model_name, args.tokenizer_name)
-    evaluate_code_generic(model, args.output_path, verbose=args.verbose, num_candidates_generated=args.num_candidates_generated, num_candidates_evaluated=args.num_candidates_evaluated)
+    model = make_model(args.model_name, args.tokenizer_name, prompt_prefix=args.prompt_prefix)
+    evaluate_code_generic(args, model)
