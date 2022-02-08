@@ -17,7 +17,7 @@ def split_function_into_docstring_infill_prompt(code: str, docstring_text: str =
     Returns:
         list of len 2, splitting code into the part before and after the docstring
     """
-    assert code.startswith("def"), "Must be a function definition"
+    assert code.startswith("def") or code.startswith("async def"), "Must be a function definition"
 
     if docstring_text is not None:
         # note that we will infill using whatever docstring quote used originally in the function (could be """, ''', #, ', ")
