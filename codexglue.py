@@ -2,7 +2,7 @@ from typing import List
 
 from datasets import load_dataset
 
-from utils import split_function_into_docstring_infill_prompt, TRIPLE_QUOTE
+from utils import split_function_into_docstring_infill_prompt, truncate_docstring_infill
 from causal_masking_infill import infill
 
 class CodeDataset:
@@ -51,7 +51,7 @@ class CodeXGlueCodeSummDataset(CodeDataset):
         self.data = load_dataset("code_x_glue_ct_code_to_text", "python", split="test")
 
     def get_prompt_parts(self, i):
-        return split_function_into_docstring_infill_prompt(self.data[i]["original_string"], has_docstring=True)
+        return split_function_into_docstring_infill_prompt(self.data[i]["original_string"], docstring_text=self.data[i]["docstring"])
 
     def evaluate(self, i, model_completion):
         pass
@@ -61,19 +61,20 @@ if __name__ == "__main__":
 
     outputs = []
 
+    output_f = open("code_summ_preds_greedy.txt", "w")
+
+
     for i in range(len(ds.data)):
         try:
-            out = infill(ds.get_prompt_parts(i), verbose=False, sampling=False)
+            prompt_parts = ds.get_prompt_parts(i)
+            out = infill(prompt_parts, verbose=False, sampling=False)
             pred_infill = out["infills"][0]
-            if TRIPLE_QUOTE not in pred_infill:
-                print(f"ERROR on {i}: ", pred_infill)
-                docstr = pred_infill
-            else:
-                docstr = pred_infill[:pred_infill.index(TRIPLE_QUOTE)].strip() 
+            docstr = truncate_docstring_infill(pred_infill)
         except Exception as e:
             print(e)
             docstr = ""
             import pdb; pdb.set_trace()
+        output_f.write(f"{i}\t{docstr}\n")
         outputs.append(docstr)
         print(i)
         print(docstr)
@@ -81,6 +82,4 @@ if __name__ == "__main__":
     with open("code_summ_preds_greedy.pkl", "wb") as f:
         pickle.dump(outputs, f)
 
-    with open("code_summ_preds_greedy.txt", "w") as f:
-        for i, output in enumerate(outputs):
-            f.write(f"{i}\t{output}")
+    output_f.close()
