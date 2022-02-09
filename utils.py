@@ -4,6 +4,7 @@ TRIPLE_QUOTE = '"""'
 SINGLE_TRIPLE_QUOTE = "'''"
 SPACES4 = " " * 4
 SPACES8 = " " * 8
+EOF = "<|/ file |>"
 
 COMMENT_DELIMITERS = ('"', "'", "\n")
 
@@ -27,7 +28,9 @@ def split_function_into_docstring_infill_prompt(code: str, docstring_text: str =
         function_def = code[:code.index(":") + 1]
         body = code[code.index(":") + 1:]
         prompt_prefix = f"{function_def}\n{SPACES4}{TRIPLE_QUOTE}"
-        prompt_suffix = "{TRIPLE_QUOTE}\n{body_pre_mask}"
+        prompt_suffix = "{TRIPLE_QUOTE}\n{body}"
+
+    prompt_suffix += f"\n{EOF}"
 
     return [prompt_prefix, prompt_suffix]
 
@@ -45,4 +48,3 @@ def truncate_docstring_infill(infill: str) -> str:
     # remove trailing whitespace
     infill = infill.strip()
     return infill
-
