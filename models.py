@@ -37,33 +37,43 @@ class Model:
         return list(sorted(scored_choices, reverse=True)), response
 
 class HFModel(Model):
-    def __init__(self, model_name, tokenizer_name=None, prompt_prefix=None):
+    def __init__(self, model_name, tokenizer_name=None, prompt_prefix=None, batch_size=None):
         if prompt_prefix is not None:
             raise NotImplementedError("--prompt_prefix for HFModel")
         from transformers import AutoModelForCausalLM, AutoTokenizer
-        self.lm_model = AutoModelForCausalLM.from_pretrained(model_name)
-        self.lm_model.eval().cuda() # TODO do half()
+        #self.lm_model = AutoModelForCausalLM.from_pretrained(model_name)
+        from transformers import GPTJForCausalLM
+        self.lm_model = GPTJForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16, low_cpu_mem_usage=True)
+        self.lm_model.eval().cuda()
     
         if tokenizer_name is None:
             tokenizer_name = model_name
         self.lm_tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
 
+        self.batch_size = batch_size
+
     def encode_stop_words(self, stop_words: List[str]):
-        return [self.lm_tokenizer.encode(token) for token in stop_words]
+        return [self.lm_tokenizer.encode(string) for string in stop_words]
 
     def complete(self, prompt, stop_words: List[str], max_tokens=450, top_p=0.95, n=1, num_log_probs=1, temperature=0.6):
         ''' This function runs GPT-2 locally using HF transformers but places the outputs into an json that looks just like the one
         provided by the OpenAI API. '''
+
+        batch_size = n if self.batch_size is None else self.batch_size
+
         assert isinstance(prompt, str)
         prompt = [prompt] # below code assumes list
 
         encoded_stop_words = self.encode_stop_words(stop_words)
+        # print(f"stop_words: {stop_words}")
+        # print(f"encoded_stop_words: {encoded_stop_words}")
 
         input_ids = self.lm_tokenizer.batch_encode_plus(prompt, return_tensors="pt", padding=False)
         choices = []
         lm_model = self.lm_model
         while len(choices) < n:
-            num_to_sample = min(5, n - len(choices))
+            num_to_sample = min(batch_size, n - len(choices))
+            print(f"num_to_sample: {num_to_sample}")
             with torch.inference_mode():
                 # generate from the model
                 total_sequences = lm_model.generate(
@@ -71,7 +81,7 @@ class HFModel(Model):
                     attention_mask=input_ids['attention_mask'].cuda(),
                     max_length=max_tokens + len(input_ids['input_ids'][0]),
                     do_sample=True,
-                    num_return_sequences=n,
+                    num_return_sequences=num_to_sample,
                     top_p=top_p,
                     early_stopping=True,
                     use_cache=True,
@@ -95,8 +105,8 @@ class HFModel(Model):
                 # if you we find one of the stopwords, then we delete everything from the stopword on
                 curr_max_tokens = None
                 for stop_word_tensor in encoded_stop_words:
-                    for possible_stop_index in len(seq):
-                        if torch.allclose(seq[possible_stop_index:len(stop_word_tensor)], stop_word_tensor):
+                    for possible_stop_index in range(len(seq)):
+                        if seq[possible_stop_index:possible_stop_index+len(stop_word_tensor)].tolist() == stop_word_tensor:
                             if curr_max_tokens is None or possible_stop_index < curr_max_tokens: # save first occurrence of stopword
                                 curr_max_tokens = possible_stop_index
 
@@ -135,7 +145,11 @@ class HFModel(Model):
         return return_json
 
 class FairseqModel(Model):
-    def __init__(self, model_path: str, bpe="gpt2_pretokenization_newlines_only", gpt2_encoder_json=None, gpt2_vocab_bpe=None, prompt_prefix=None):
+    def __init__(self, model_path: str, tokenizer_name=None, gpt2_encoder_json=None, gpt2_vocab_bpe=None, prompt_prefix=None, batch_size=None):
+        if tokenizer_name is None:
+            bpe = "gpt2_pretokenization_newlines_only"
+        else:
+            bpe = tokenizer_name
         self.bpe = bpe
         assert bpe in ["gpt2_pretokenization_newlines_only", "gpt2"], f"invalid bpe type {bpe}"
         if not model_path.endswith(".pt"):
@@ -153,10 +167,12 @@ class FairseqModel(Model):
         from fairseq.models.transformer_lm import TransformerLanguageModel
         self.lm_model = TransformerLanguageModel.from_pretrained(
             model_root_dir, model_basename, bpe=bpe, gpt2_encoder_json=gpt2_encoder_json, gpt2_vocab_bpe=gpt2_vocab_bpe
-            )
-        self.lm_model.eval().cuda() # TODO do half()
+            ).half()
+        self.lm_model.eval().cuda() 
         self.prompt_prefix = prompt_prefix
+        self.eos_index = self.lm_model.task.dictionary.eos_index
 
+        self.batch_size = batch_size
 
     def encode_stop_words(self, stop_words: List[str]):
         # TODO: I don't think this is needed anymore
@@ -183,6 +199,8 @@ class FairseqModel(Model):
         ''' This function runs fairseq LM locally but places the outputs into an json that looks just like the one
         provided by the OpenAI API. '''
 
+        batch_size = n if self.batch_size is None else self.batch_size
+
         if num_log_probs != 1:
             raise NotImplementedError()
 
@@ -199,15 +217,32 @@ class FairseqModel(Model):
             lm_model.cfg.generation['max_len_b'] = max_tokens
 
             encoded_prompt = self._encode(prompt)
-
             prompt_len = len(encoded_prompt)
 
-            # greedily generate l tokens
-            # total_sequences is now the input + possible generated output
-            # beam is actually just the num of candidates to sample, when sampling=True
-            completions = lm_model.generate([encoded_prompt], sampling=True, sampling_topp=top_p, temperature=temperature, beam=n)
-            # batch size 1
-            completions = completions[0]
+            if False:
+                # prepend EOS
+                encoded_prompt = torch.cat((torch.tensor(2).unsqueeze(-1), encoded_prompt))
+
+
+            completions = []
+            while len(completions) < n:
+                this_n = min(batch_size, n - len(completions))
+                # greedily generate l tokens
+                # total_sequences is now the input + possible generated output
+                # beam is actually just the num of candidates to sample, when sampling=True
+                if temperature == 0:
+                    assert n==1
+                    this_completions = lm_model.generate(
+                        [encoded_prompt], sampling=True, beam=1, sampling_topk=1,
+                    )
+                else:
+                    this_completions = lm_model.generate(
+                        [encoded_prompt], sampling=True, beam=this_n, sampling_topp=top_p, temperature=temperature,
+                    )
+                # only completing a single sequence
+                this_completions = this_completions[0]
+                completions.extend(this_completions)
+            assert len(completions) == n
             # -1 to remove EOS, both from encoded prompt and from completion
             all_tokens = [completion['tokens'][prompt_len-1:-1] for completion in completions]
             # TODO: these scores are post-temperature-scaling log probs. is this consistent with HF and codex?
@@ -285,8 +320,8 @@ class CausalMasking(FairseqModel):
     def _extra_stop_words(self):
         return super()._extra_stop_words + self._special_tokens
 
-    def __init__(self, model_path: str, bpe="gpt2_pretokenization_newlines_only", gpt2_encoder_json=None, gpt2_vocab_bpe=None, prompt_prefix=None):
-        super().__init__(model_path, bpe, gpt2_encoder_json, gpt2_vocab_bpe, prompt_prefix)
+    def __init__(self, model_path: str, bpe="gpt2_pretokenization_newlines_only", gpt2_encoder_json=None, gpt2_vocab_bpe=None, prompt_prefix=None, batch_size=None):
+        super().__init__(model_path, bpe, gpt2_encoder_json, gpt2_vocab_bpe, prompt_prefix, batch_size=batch_size)
         assert bpe in {"gpt2_pretokenization_newlines_only", "bpe"}
         from tokenizers import ByteLevelBPETokenizer
         self.tokenizer = tokenizer = ByteLevelBPETokenizer.from_file(
@@ -297,7 +332,8 @@ class CausalMasking(FairseqModel):
         tokenizer.add_special_tokens(self._special_tokens)
 
     def _encode(self, text):
-        return torch.tensor(self.tokenizer.encode(text).ids) + self.TOKENIZER_OFFSET
+        return torch.tensor(self.tokenizer.encode(text).ids + [self.eos_index - self.TOKENIZER_OFFSET]) + self.TOKENIZER_OFFSET
+        #return torch.tensor(self.tokenizer.encode(text).ids) + self.TOKENIZER_OFFSET
 
     def _decode(self, tokens):
         token_ids = torch.tensor(tokens)
@@ -383,16 +419,20 @@ class OpenAIModel(Model):
                 time.sleep(CODEX_RETRY_DELAY_SECONDS)
         return response
 
-def make_model(model_name, tokenizer_name, prompt_prefix=None):
+def make_model(args, model_name, tokenizer_name=None, prompt_prefix=None):
     if 'davinci' in model_name or 'cushman' in model_name:
         if prompt_prefix is not None:
             raise NotImplementedError()
         return OpenAIModel(model_name, persistent=True)
     elif 'fairseq' or '/checkpoint' in model_name:
         if 'cm-' in model_name:
-            return CausalMasking(model_name, prompt_prefix=prompt_prefix)
+            return CausalMasking(model_name, prompt_prefix=prompt_prefix, batch_size=args.batch_size)
         elif 'lm-' in model_name:
-            return FairseqModel(model_name, prompt_prefix=prompt_prefix)
+            return FairseqModel(model_name, prompt_prefix=prompt_prefix, batch_size=args.batch_size)
+        elif 'gpt-j' in model_name:
+            if prompt_prefix is not None:
+                raise NotImplementedError()
+            return HFModel(model_name, tokenizer_name, batch_size=args.batch_size)
         else:
             raise ValueError(f"couldn't guess model type from {model_name}")
     elif model_name == 'code-gpt2':
@@ -402,4 +442,4 @@ def make_model(model_name, tokenizer_name, prompt_prefix=None):
     else:
         if prompt_prefix is not None:
             raise NotImplementedError()
-        return HFModel(model_name, tokenizer_name)
+        return HFModel(model_name, tokenizer_name, batch_size=args.batch_size)

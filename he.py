@@ -17,7 +17,7 @@ if __name__ == "__main__":
     print(' '.join(sys.argv))
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name", type=str)
-    parser.add_argument("--tokenizer_name", type=str)
+    parser.add_argument("--tokenizer_name", type=str, choices=["gpt2", "gpt2_pretokenization_newlines_only"])
     parser.add_argument("--num_problems", type=int)
     parser.add_argument("--num_candidates_generated", type=int, default=15)
     parser.add_argument("--num_candidates_evaluated", type=int, default=1)
@@ -29,6 +29,8 @@ if __name__ == "__main__":
     parser.add_argument("--temperature", type=float, default=0.6)
     parser.add_argument("--top_p", type=float, default=0.95)
 
+    parser.add_argument("--batch_size", type=int)
+
     parser.add_argument("--prompt_prefix")
     parser.add_argument("--candidate_scoring", choices=["mean", "sum"], default="mean")
 
@@ -39,7 +41,7 @@ if __name__ == "__main__":
         assert args.cached_responses, "must pass --model_name=<model> or --cached_responses"
         model = Model()
     else:
-        model = make_model(args.model_name, args.tokenizer_name, prompt_prefix=args.prompt_prefix)
+        model = make_model(args, args.model_name, args.tokenizer_name, prompt_prefix=args.prompt_prefix)
 
     problems = list(sorted(read_problems().items()))
     if args.num_problems is not None:
