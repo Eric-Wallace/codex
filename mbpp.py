@@ -215,7 +215,7 @@ if __name__ == '__main__':
     parser.add_argument("--batch_size", type=int)
 
     parser.add_argument("--prompt_prefix")
-    parser.add_argument("--candidate_scoring", choices=["mean", "sum"], default="mean")
+    parser.add_argument("--candidate_scoring", choices=["mean", "sum", "random"], default="mean")
 
     parser.add_argument("--k_shot", type=int)
     parser.add_argument("--prompt_template", choices=["google", "comment"], default="comment")

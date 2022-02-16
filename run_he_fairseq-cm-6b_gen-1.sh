@@ -1,5 +1,5 @@
 #!/bin/bash
-iters=36750
+iters=best
 #model="/checkpoint/armenag/codex/models/checkpoint_1_${iters}_consolidated.pt"
 model="/checkpoint/dpf/models/cm-6B-armen/checkpoint_1_${iters}_consolidated.pt"
 

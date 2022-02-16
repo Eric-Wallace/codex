@@ -1,10 +1,15 @@
 import os
 import time
 import numpy as np
-import torch
 from typing import List
+import random
+import sys
 
 from collections import namedtuple
+try:
+    import torch
+except:
+    print("couldn't import torch; won't be able to use most models", file=sys.stderr)
 
 CODEX_RETRY_DELAY_SECONDS = 60
 CODEX_MAX_RETRIES = 30
@@ -17,7 +22,7 @@ class Model:
         raise NotImplementedError()
 
     def rank_completions(self, prompt: str, stop_words: List[str], cached_response=None, scoring='mean', **kwargs):
-        assert scoring in ['mean', 'sum']
+        assert scoring in ['mean', 'sum', 'random']
         if cached_response is None:
             response = self.complete(prompt, stop_words, **kwargs)
         else:
@@ -28,6 +33,8 @@ class Model:
                 return token_logprobs.mean()
             elif scoring == 'sum':
                 return token_logprobs.sum()
+            elif scoring == 'random':
+                return random.random()
             else:
                 raise NotImplementedError(f"scoring {scoring}")
         scored_choices = [
@@ -189,10 +196,12 @@ class FairseqModel(Model):
     def _extra_stop_words(self):
         return ["<| ", "<|/ ", "<code>", "</code>", "<cell>", "</cell>"]
 
-    def _encode(self, text: str) -> torch.tensor:
+    def _encode(self, text: str):
+        # -> torch.tensor
         return self.lm_model.encode(text)
 
-    def _decode(self, tokens: torch.tensor) -> str:
+    def _decode(self, tokens) -> str:
+        # tokens: torch.tensor
         return self.lm_model.decode(tokens)
 
     def complete(self, prompt: str, stop_words: List[str], max_tokens=450, top_p=0.95, n=1, num_log_probs=1, temperature=0.6):
