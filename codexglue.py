@@ -2,7 +2,7 @@ from typing import List
 
 from datasets import load_dataset
 
-from utils import split_function_into_docstring_infill_prompt, truncate_docstring_infill
+from utils import build_docstring_infill_prompt, truncate_docstring_infill
 from causal_masking_infill import infill
 
 class CodeDataset:
@@ -51,7 +51,7 @@ class CodeXGlueCodeSummDataset(CodeDataset):
         self.data = load_dataset("code_x_glue_ct_code_to_text", "python", split="test")
 
     def get_prompt_parts(self, i):
-        return split_function_into_docstring_infill_prompt(self.data[i]["original_string"], docstring_text=self.data[i]["docstring"])
+        return build_docstring_infill_prompt(self.data[i]["original_string"], docstring_text=self.data[i]["docstring"])
 
     def evaluate(self, i, model_completion):
         pass
@@ -61,8 +61,7 @@ if __name__ == "__main__":
 
     outputs = []
 
-    output_f = open("code_summ_preds_greedy.txt", "w")
-
+    output_f = open("6b_code_summ_preds_greedy.txt", "w")
 
     for i in range(len(ds.data)):
         try:
@@ -75,11 +74,13 @@ if __name__ == "__main__":
             docstr = ""
             import pdb; pdb.set_trace()
         output_f.write(f"{i}\t{docstr}\n")
+        if i % 50 == 0:
+            output_f.flush()
         outputs.append(docstr)
         print(i)
         print(docstr)
 
-    with open("code_summ_preds_greedy.pkl", "wb") as f:
+    with open("6b_code_summ_preds_greedy.pkl", "wb") as f:
         pickle.dump(outputs, f)
 
     output_f.close()
