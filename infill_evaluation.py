@@ -8,6 +8,13 @@ import numpy as np
 from he import HUMAN_EVAL_STOP_WORDS
 
 def run_systematic_infill(eval_type="one_line"):
+    """Masks out a subset of lines in the HumanEval reference solution and infills with the CM model. Saves the output to a file for later evaluation.
+
+    Args:
+        eval_type (str):
+            "one_line": mask out all possible single lines
+            "all_lines": mask out all possible multi-line chunks
+    """
     from causal_masking_infill import infill 
 
     assert eval_type in ("one_line", "all_lines")
@@ -66,6 +73,9 @@ def run_systematic_infill(eval_type="one_line"):
     result_json.close()
 
 def evaluate_one_line_systematic():
+    """Reads infilled one-line completions from a file, postprocesses them (truncates them to one line), and evaluates
+    functional correctness (average pass rate / exact match).
+    """
     outputs = []
     with open("he_one_line_systematic.json") as f:
         for line in f:
