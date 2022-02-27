@@ -4,10 +4,13 @@ from utils import build_systematic_infill_prompt
 import json
 import pickle
 import numpy as np
+import tqdm
+import os
+import sys
 
 from he import HUMAN_EVAL_STOP_WORDS
 
-def run_systematic_infill(eval_type="one_line", result_base_path=None):
+def run_systematic_infill(eval_type="one_line"):
     """Masks out a subset of lines in the HumanEval reference solution and infills with the CM model. Saves the output to a file for later evaluation.
 
     Args:
@@ -78,60 +81,77 @@ def run_systematic_infill(eval_type="one_line", result_base_path=None):
 
     result_json.close()
 
-def evaluate_one_line_systematic():
+def read_file(filename):
+    if filename.endswith(".json"):
+        with open(filename) as f:
+            return [json.loads(line) for line in f]
+    elif filename.endswith(".pkl"):
+        with open(filename, 'rb') as f:
+            return pickle.load(f)
+    else:
+        raise NotImplementedError()
+
+def evaluate_one_line_systematic(filename):
     """Reads infilled one-line completions from a file, postprocesses them (truncates them to one line), and evaluates
     functional correctness (average pass rate / exact match).
     """
-    outputs = []
-    with open("he_one_line_systematic.json") as f:
-        for line in f:
-            outputs.append(json.loads(line))
-    
+
+    outputs = read_file(filename)
     problems = read_problems()
 
     functional_results = []
     samples_to_eval = []
-    for out in outputs:
-        for infill_res in out["infill_results"]:
-            # truncate infill to be one line
-            infill = infill_res["infill"]
-            if infill.startswith("\n"):
-                if "\n" not in infill[1:]:
-                    infilled_line = infill
+    with tqdm.tqdm(outputs, ncols=120) as p:
+        for out in p:
+            if functional_results:
+                avg_pass = np.mean([x["passed"] for x in functional_results])
+                avg_exact = np.mean([x["exact_match"] for x in functional_results])
+                p.set_postfix({'pass': avg_pass, 'exact': avg_exact})
+            for infill_res in out["infill_results"]:
+                # truncate infill to be one line
+                infill = infill_res["infill"]
+                if infill.startswith("\n"):
+                    if "\n" not in infill[1:]:
+                        infilled_line = infill
+                    else:
+                        infilled_line = infill[:infill[1:].index("\n") + 1]
                 else:
-                    infilled_line = infill[:infill[1:].index("\n") + 1]
-            else:
-                infilled_line = infill[:infill.index("\n") + 1]
+                    if "\n" in infill:
+                        infilled_line = infill[:infill.index("\n") + 1]
+                    else:
+                        infilled_line = infill
 
-            # check mismatched indent?
-            is_exact_match = infilled_line.rstrip() == infill_res["missing_lines"].rstrip()
+                # check mismatched indent?
+                is_exact_match = infilled_line.rstrip() == infill_res["missing_lines"].rstrip()
 
-            complete = "".join([infill_res["prompt_parts"][0],
-                infilled_line,
-                infill_res["prompt_parts"][1]])
+                complete = "".join([infill_res["prompt_parts"][0],
+                    infilled_line,
+                    infill_res["prompt_parts"][1]])
 
-            res = check_correctness(
-                problem=problems[out["task_id"]],
-                completion=complete,
-                timeout=3.0)
-            functional_results.append({
-                "task_id": out["task_id"],
-                "num_before": infill_res["num_before"],
-                "num_after": infill_res["num_after"],
-                "passed": res["passed"],
-                "exact_match": is_exact_match, 
-                })
-            print(f"{out['task_id']} | pass {res['passed']} | exact {is_exact_match}")
+                res = check_correctness(
+                    problem=problems[out["task_id"]],
+                    completion=complete,
+                    timeout=3.0)
+                functional_results.append({
+                    "task_id": out["task_id"],
+                    "num_before": infill_res["num_before"],
+                    "num_after": infill_res["num_after"],
+                    "passed": res["passed"],
+                    "exact_match": is_exact_match, 
+                    })
+                #print(f"{out['task_id']} | pass {res['passed']} | exact {is_exact_match}")
+
     avg_pass = np.mean([x["passed"] for x in functional_results])
     avg_exact = np.mean([x["exact_match"] for x in functional_results])
     
-    print(avg_pass)
-    print(avg_exact)
-    
-    with open("he_one_line_systematic__functional_eval.json", "w") as f:
+    print("average pass:", avg_pass)
+    print("average exact:", avg_exact)
+
+    with open(f"{os.path.splitext(filename)[0]}__functional_eval.json", "w") as f:
         json.dump(functional_results, f)
 
 if __name__ == "__main__":
-    #evaluate_one_line_systematic()
-    #run_systematic_infill(eval_type="one_line", result_base_path="he_infill_none")
-    run_systematic_infill(eval_type="one_line", result_base_path="he_infill_eos_blocked")
+    filename = sys.argv[1]
+    # run_systematic_infill(eval_type="all_lines")
+    # run_systematic_infill(eval_type="one_line", result_base_path="he_infill_eos_blocked")
+    evaluate_one_line_systematic(filename)
