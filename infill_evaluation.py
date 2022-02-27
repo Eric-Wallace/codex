@@ -7,7 +7,7 @@ import numpy as np
 
 from he import HUMAN_EVAL_STOP_WORDS
 
-def run_systematic_infill(eval_type="one_line"):
+def run_systematic_infill(eval_type="one_line", result_base_path=None):
     """Masks out a subset of lines in the HumanEval reference solution and infills with the CM model. Saves the output to a file for later evaluation.
 
     Args:
@@ -20,7 +20,13 @@ def run_systematic_infill(eval_type="one_line"):
     assert eval_type in ("one_line", "all_lines")
     problems = list(sorted(read_problems().items()))
     results = []
-    result_json = open(f"he_{eval_type}_systematic.json", "w")
+    if result_base_path is not None:
+        result_json_fname = f"{result_base_path}.json"
+        result_pkl_fname = f"{result_base_path}.pkl"
+    else:
+        result_json_fname = f"he_{eval_type}_systematic.json"
+        result_pkl_fname = f"he_{eval_type}_systematic.pkl"
+    result_json = open(result_json_fname, "w")
 
     for i, (task_id, problem) in enumerate(problems): 
         print(task_id)
@@ -67,7 +73,7 @@ def run_systematic_infill(eval_type="one_line"):
         if i % 10 == 0:
             result_json.flush()
 
-    with open(f"he_{eval_type}_systematic.pkl", "wb") as f:
+    with open(result_pkl_fname, "wb") as f:
         pickle.dump(results, f)
 
     result_json.close()
@@ -126,5 +132,6 @@ def evaluate_one_line_systematic():
         json.dump(functional_results, f)
 
 if __name__ == "__main__":
-    evaluate_one_line_systematic()
-#    run_systematic_infill(eval_type="all_lines")
+    #evaluate_one_line_systematic()
+    #run_systematic_infill(eval_type="one_line", result_base_path="he_infill_none")
+    run_systematic_infill(eval_type="one_line", result_base_path="he_infill_eos_blocked")
