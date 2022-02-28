@@ -7,10 +7,13 @@ import numpy as np
 import tqdm
 import os
 import sys
+import pprint
+
+from causal_masking_infill import InfillingModel
 
 from he import HUMAN_EVAL_STOP_WORDS
 
-def run_systematic_infill(eval_type="one_line"):
+def run_systematic_infill(args, eval_type="one_line", result_base_path=None):
     """Masks out a subset of lines in the HumanEval reference solution and infills with the CM model. Saves the output to a file for later evaluation.
 
     Args:
@@ -18,7 +21,7 @@ def run_systematic_infill(eval_type="one_line"):
             "one_line": mask out all possible single lines
             "all_lines": mask out all possible multi-line chunks
     """
-    from causal_masking_infill import infill 
+    infilling_model = InfillingModel(args.model_path)
 
     assert eval_type in ("one_line", "all_lines")
     problems = list(sorted(read_problems().items()))
@@ -31,8 +34,7 @@ def run_systematic_infill(eval_type="one_line"):
         result_pkl_fname = f"he_{eval_type}_systematic.pkl"
     result_json = open(result_json_fname, "w")
 
-    for i, (task_id, problem) in enumerate(problems): 
-        print(task_id)
+    for i, (task_id, problem) in enumerate(tqdm.tqdm(problems, ncols=120)): 
         soln = problem["canonical_solution"].rstrip() # note we strip extra newlines
         num_lines = len(soln.split("\n"))
         
@@ -52,7 +54,10 @@ def run_systematic_infill(eval_type="one_line"):
                     soln,
                     num_before,
                     num_after)
-            out = infill(prompt_parts, verbose=False, sampling=False)
+            if args.temperature == 0.0:
+                out = infilling_model.infill(prompt_parts, verbose=False, sampling=False)
+            else:
+                out = infilling_model.infill(prompt_parts, verbose=False, sampling=True, sampling_topp=args.top_p, sampling_temperature=args.temperature)
             infill_results.append({
                 "num_before": num_before,
                 "num_after": num_after,
@@ -61,9 +66,9 @@ def run_systematic_infill(eval_type="one_line"):
                 "infill": out["infills"][0],
                 "complete": out["complete"][0],
                 })
-            print("="*20)
-            print("Prompt: ", prompt_parts)
-            print(out["infills"][0])
+            # print("="*20)
+            # print("Prompt: ", prompt_parts)
+            # print(out["infills"][0])
 
         result = {
                 "num_lines": num_lines,
@@ -147,11 +152,24 @@ def evaluate_one_line_systematic(filename):
     print("average pass:", avg_pass)
     print("average exact:", avg_exact)
 
-    with open(f"{os.path.splitext(filename)[0]}__functional_eval.json", "w") as f:
+    ext_stripped = os.path.splitext(filename)[0]
+    with open(f"{ext_stripped}__functional_eval.json", "w") as f:
         json.dump(functional_results, f)
 
 if __name__ == "__main__":
-    filename = sys.argv[1]
-    # run_systematic_infill(eval_type="all_lines")
-    # run_systematic_infill(eval_type="one_line", result_base_path="he_infill_eos_blocked")
-    evaluate_one_line_systematic(filename)
+    print(' '.join(sys.argv))
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model_path", required=True)
+    parser.add_argument("--result_base_path")
+    parser.add_argument("--eval_type", choices=["one_line", "all_lines"], default="one_line")
+    parser.add_argument("--evaluate_only", action="store_true")
+    parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--top_p", type=float, default=0.95)
+
+    args = parser.parse_args()
+    pprint.pprint(vars(args))
+
+    if not args.evaluate_only:
+        run_systematic_infill(args, eval_type=args.eval_type, result_base_path=args.result_base_path)
+    evaluate_one_line_systematic(f"{result_base_path}.pkl")

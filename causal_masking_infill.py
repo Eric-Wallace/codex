@@ -8,120 +8,137 @@ from typing import List
 
 from tokenizers import ByteLevelBPETokenizer
 
-#root_dir="/checkpoint/dpf/models/cm-1.3B-ourtok-lr8e-4/"
-root_dir="/checkpoint/dpf/models/cm-1.3B-ourtok-lr8e-4--4e-4/cm-1B-ourtok/"
-ours = TransformerLanguageModel.from_pretrained(root_dir, "49000.pt", bpe="gpt2_pretokenization_newlines_only", gpt2_encoder_json=f"{root_dir}/vocab.json", gpt2_vocab_bpe=f"{root_dir}/merges.txt").cuda().eval()
-is_cm = True
+# root_dir="/checkpoint/dpf/models/cm-6B-armen-none/"
+# fname = "checkpoint_best_consolidated.pt"
 
-EOSS = "<eoss>"
+class InfillingModel:
+    TOKENIZER_OFFSET = 4
 
-def make_sentinel(i):
-    return f"<sentinel:{i}>"
+    EOSS = "<eoss>"
 
-tokenizer = ByteLevelBPETokenizer.from_file(
-    os.path.join(root_dir, "vocab.json"),
-    os.path.join(root_dir, "merges.txt"),
-    pretokenizer_split_newlines_only=True
-)
+    def __init__(self, model_path):
+        self.model_path = model_path
+        root_dir, fname = os.path.split(model_path)
+        self.root_dir, self.fname = root_dir, fname
 
-if is_cm:
-    special_tokens = []
-    for i in range(256):
-        special_tokens.append(make_sentinel(i))
-    special_tokens.append(EOSS)
-    tokenizer.add_special_tokens(special_tokens)
+        print(f"loading model from {root_dir}/{fname}")
+        #root_dir="/checkpoint/dpf/models/cm-1.3B-ourtok-lr8e-4--4e-4/cm-1B-ourtok/"
+        model = TransformerLanguageModel.from_pretrained(root_dir, fname, bpe="gpt2_pretokenization_newlines_only", gpt2_encoder_json=f"{root_dir}/vocab.json", gpt2_vocab_bpe=f"{root_dir}/merges.txt")
+        model = model.half()
+        model = model.cuda().eval()
+        self.model = model
+        is_cm = True
 
-# set the max generation length
-ours.cfg.generation['max_len_b'] = 500
+        self.tokenizer = tokenizer = ByteLevelBPETokenizer.from_file(
+            os.path.join(root_dir, "vocab.json"),
+            os.path.join(root_dir, "merges.txt"),
+            pretokenizer_split_newlines_only=True
+        )
 
-TOKENIZER_OFFSET = 4
+        if is_cm:
+            special_tokens = []
+            for i in range(256):
+                special_tokens.append(self.make_sentinel(i))
+            special_tokens.append(self.EOSS)
+            tokenizer.add_special_tokens(special_tokens)
 
-EOSS_ID = tokenizer.token_to_id(EOSS) + TOKENIZER_OFFSET
+        # set the max generation length
+        model.cfg.generation['max_len_b'] = 500
 
-def encode(s):
-    return torch.tensor(tokenizer.encode(s).ids) + TOKENIZER_OFFSET
 
-def decode(token_ids):
-    token_ids = torch.tensor(token_ids)
-    return tokenizer.decode((token_ids - TOKENIZER_OFFSET).tolist(), skip_special_tokens=False)
+        self.EOSS_ID = tokenizer.token_to_id(self.EOSS) + self.TOKENIZER_OFFSET
 
-def sentinel_id(i):
-    return tokenizer.token_to_id(make_sentinel(i)) + TOKENIZER_OFFSET
+    def encode(self, s):
+        return torch.tensor(self.tokenizer.encode(s).ids) + self.TOKENIZER_OFFSET
 
-def complete(s, model=ours, **kwargs):
-    """ complete the prefix s autoregressively """
-    with torch.no_grad():
-        #encoded = model.encode(s)
-        encoded = torch.tensor(tokenizer.encode(s).ids) + 4
-        #encoded = encoded.cuda()
-        completion = model.generate([encoded], **kwargs)[0][0]['tokens']
-        completion = (completion - 4)[:-1]
-        return tokenizer.decode(completion.cpu().tolist(), skip_special_tokens=False)
-        #return model.decode(completion)
+    def decode(self, token_ids):
+        token_ids = torch.tensor(token_ids)
+        return self.tokenizer.decode((token_ids - self.TOKENIZER_OFFSET).tolist(), skip_special_tokens=False)
 
-def infill(parts: List[str], model=ours, verbose=False, **kwargs):
-    # Force the model to fill in code in between each string in parts
-    # see code_to_docstring and docstring_to_code for example usages
-    assert isinstance(parts, list)
-    infills = []
-    if len(parts) == 1:
-        return complete(parts[0])[len(parts[0]):]
+    @staticmethod
+    def make_sentinel(i):
+        return f"<sentinel:{i}>"
 
-    ids = []
+    def sentinel_id(self, i):
+        return self.tokenizer.token_to_id(self.make_sentinel(i)) + self.TOKENIZER_OFFSET
 
-    # encode parts separated by sentinel
-    for sentinel_ix, part in enumerate(parts):
-        part_tokens = encode(part)
-        ids.extend(part_tokens.tolist())
-        if sentinel_ix < len(parts) - 1:
-            ids.append(sentinel_id(sentinel_ix))
-
-    infills = []
-
-    complete = []
-
-    # autoregressively fill in
-    for sentinel_ix, part in enumerate(parts[:-1]):
-        ids.append(sentinel_id(sentinel_ix))
-        if verbose:
-            print(part, end="")
-            print(f"<sentinel:{sentinel_ix}>", end="")
+    def complete(self, s, **kwargs):
+        """ complete the prefix s autoregressively """
+        model = self.model
+        tokenizer = self.tokenizer
         with torch.no_grad():
-            completion = model.generate([torch.tensor(ids)], **kwargs)[0][0]['tokens'].tolist()
-            if completion[-1] == 2:
-                completion = completion[:-1]
+            #encoded = model.encode(s)
+            encoded = torch.tensor(tokenizer.encode(s).ids) + 4
+            #encoded = encoded.cuda()
+            completion = model.generate([encoded], **kwargs)[0][0]['tokens']
+            completion = (completion - 4)[:-1]
+            return tokenizer.decode(completion.cpu().tolist(), skip_special_tokens=False)
+            #return model.decode(completion)
 
+    def infill(self, parts: List[str], verbose=False, **kwargs):
+        # Force the model to fill in code in between each string in parts
+        # see code_to_docstring and docstring_to_code for example usages
+        model = self.model
+        tokenizer = self.tokenizer
+        assert isinstance(parts, list)
+        infills = []
+        if len(parts) == 1:
+            return self.complete(parts[0])[len(parts[0]):]
 
-        completion = completion[len(ids):]
+        ids = []
 
-        if EOSS_ID in completion:
-            completion = completion[:completion.index(EOSS_ID)+1]
-        else:
-            if not verbose:
-                print(f"warning: {EOSS} not found", file=sys.stderr)
-            completion = completion + [EOSS_ID]
+        # encode parts separated by sentinel
+        for sentinel_ix, part in enumerate(parts):
+            part_tokens = self.encode(part)
+            ids.extend(part_tokens.tolist())
+            if sentinel_ix < len(parts) - 1:
+                ids.append(self.sentinel_id(sentinel_ix))
 
-        ids.extend(completion)
+        infills = []
 
-        decoded = decode(completion[:-1])
-        complete.append(part)
-        complete.append(decoded)
-        infills.append(decoded)
+        complete = []
 
-    complete.append(parts[-1])
+        # autoregressively fill in
+        for sentinel_ix, part in enumerate(parts[:-1]):
+            ids.append(self.sentinel_id(sentinel_ix))
+            if verbose:
+                print(part, end="")
+                print(f"<sentinel:{sentinel_ix}>", end="")
+            with torch.no_grad():
+                completion = model.generate([torch.tensor(ids)], **kwargs)[0][0]['tokens'].tolist()
+                if completion[-1] == 2:
+                    completion = completion[:-1]
 
-    if verbose:
-        print(parts[-1])
-        print("-"*20)
-        print(''.join((complete)))
-    return {
-        'complete': complete,
-        'infills': infills,
-        'ids': ids,
-        'raw': decode(ids)
-    }
+            completion = completion[len(ids):]
 
-def code_to_docstring(**kwargs):
+            if self.EOSS_ID in completion:
+                completion = completion[:completion.index(self.EOSS_ID)+1]
+            else:
+                if not verbose:
+                    print(f"warning: {self.EOSS} not found", file=sys.stderr)
+                completion = completion + [self.EOSS_ID]
+
+            ids.extend(completion)
+
+            decoded = self.decode(completion[:-1])
+            complete.append(part)
+            complete.append(decoded)
+            infills.append(decoded)
+
+        complete.append(parts[-1])
+
+        if verbose:
+            print(parts[-1])
+            print("-"*20)
+            print(''.join((complete)))
+        return {
+            'complete': complete,
+            'infills': infills,
+            'ids': ids,
+            'raw': self.decode(ids)
+        }
+
+def code_to_docstring(infilling_model, **kwargs):
     header = '''def count_words(filename):
     "'''
 
@@ -132,11 +149,11 @@ def code_to_docstring(**kwargs):
             words = line.split(' ')
             counts.update(words)
     return counts\n<|/ file |>'''
-    return infill([header, body], **kwargs)
+    return infilling_model.infill([header, body], **kwargs)
 
-def docstring_to_code(**kwargs):
-    return infill(['def ', '    """Count the number of occurrences of each word in the file."""\n', '<|/ file |>'], **kwargs)
+def docstring_to_code(infilling_model, **kwargs):
+    return infilling_model.infill(['def ', '    """Count the number of occurrences of each word in the file."""\n', '<|/ file |>'], **kwargs)
 
 if __name__ == "__main__":
-    _ = code_to_docstring(verbose=True, sampling=True, sampling_topp=0.6, temperature=0.6)
-
+    infilling_model = InfillingModel("/checkpoint/dpf/models/cm-6B-armen/cm-6B-ourtok/best.pt")
+    _ = code_to_docstring(infilling_model, verbose=True, sampling=True, sampling_topp=0.6, temperature=0.6)
