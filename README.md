@@ -1,6 +1,6 @@
 
 # TODO:
-- [] clean up `causal_masking_infill` to take in a model path
+- [X] clean up `causal_masking_infill` to take in a model path
 
 # CodeXGlue code-to-text docstring generation:
 
