@@ -10,6 +10,7 @@ import sys
 import pprint
 
 from causal_masking_infill import InfillingModel
+from models import make_model
 
 from he import HUMAN_EVAL_STOP_WORDS
 
@@ -86,9 +87,61 @@ def run_systematic_infill(args, eval_type="one_line", result_base_path=None):
 
     result_json.close()
 
-def run_systematic_infill_causal(args, eval_type = "one_line", result_base_path = None):
-    ...
+def run_systematic_infill_causal(args,
+        result_base_path = None):
+    """Masks out a subset of lines in the HumanEval reference solution and infills with a left-to-right model.
+    Saves the output to a file for later evaluation.
+    """
+    model = make_model(args, args.model_path, args.tokenizer_name, prompt_prefix=args.prompt_prefix)
 
+    problems = list(sorted(read_problems().items()))
+    results = []
+    if result_base_path is not None:
+        result_json_fname = f"{result_base_path}.json"
+        result_pkl_fname = f"{result_base_path}.pkl"
+    else:
+        result_json_fname = f"he_systematic.json"
+        result_pkl_fname = f"he_systematic.pkl"
+    result_json = open(result_json_fname, "w")
+
+    for i, (task_id, problem) in enumerate(tqdm.tqdm(problems, ncols=120)):
+        soln = problem["canonical_solution"].rstrip() # note we strip extra newlines
+        soln_lines = soln.split("\n")
+        num_lines = len(soln_lines)
+
+        infill_results = []
+
+        for num_before in range(num_lines):
+            prompt_with_partial_soln = problem["prompt"] + "\n".join(soln_lines[:num_before])
+            completions, response = model.rank_completions(
+                    prompt_with_partial_soln, HUMAN_EVAL_STOP_WORDS,
+                    max_tokens=600,
+                    n=args.num_candidates,
+                    scoring=args.candidate_scoring,
+                    temperature=args.temperature,
+                    top_p=args.top_p,
+                    )
+            infill_results.append({
+                "num_before": num_before,
+                "prompt": prompt_with_partial_soln,
+                "infill_candidates": completions,
+                "infill_response": response,
+                })
+        result = {
+            "num_lines": num_lines,
+            "task_id": task_id,
+            "canonical_solution": problem["canonical_solution"],
+            "infill_results": infill_results
+                }
+        results.append(result)
+        result_json.write(json.dumps(result) + "\n")
+        if i % 10 == 0:
+            result_json.flush()
+
+    with open(result_pkl_fname, "wb") as f:
+        pickle.dump(results, f)
+
+    result_json.close()
 
 def evaluate_systematic(filename: str, truncation_heuristic: str = "num_lines"):
     """Reads infilled one-line completions from a file, postprocesses them (truncates them to one line or multi-line w/ heuristics),
@@ -158,15 +211,25 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_path", required=True)
+    parser.add_argument("--tokenizer_name", type=str, choices=["gpt2", "gpt2_pretokenization_newlines_only"])
+    parser.add_argument("--prompt_prefix", type=str)
+    parser.add_argument("--batch_size", type=int, default=3)
     parser.add_argument("--result_base_path")
     parser.add_argument("--eval_type", choices=["one_line", "all_lines"], default="one_line")
     parser.add_argument("--evaluate_only", action="store_true")
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top_p", type=float, default=0.95)
 
+    # for LTR models
+    parser.add_argument("--num_candidates", type=int, default=10)
+    parser.add_argument("--candidate_scoring", choices=["mean", "sum"], default="mean")
+
     args = parser.parse_args()
     pprint.pprint(vars(args))
 
     if not args.evaluate_only:
-        run_systematic_infill(args, eval_type=args.eval_type, result_base_path=args.result_base_path)
-    evaluate_systematic(f"{args.result_base_path}.pkl")
+        if "gpt-j" in args.model_path:
+            run_systematic_infill_causal(args, result_base_path=args.result_base_path)
+        else:
+            run_systematic_infill(args, eval_type=args.eval_type, result_base_path=args.result_base_path)
+#    evaluate_systematic(f"{args.result_base_path}.pkl")
