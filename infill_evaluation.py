@@ -1,6 +1,6 @@
 from human_eval.data import read_problems
 from human_eval.execution import check_correctness
-from utils import build_systematic_infill_prompt
+from utils import build_systematic_infill_prompt, truncate_num_lines, read_file
 import json
 import pickle
 import numpy as np
@@ -86,19 +86,13 @@ def run_systematic_infill(args, eval_type="one_line", result_base_path=None):
 
     result_json.close()
 
-def read_file(filename):
-    if filename.endswith(".json"):
-        with open(filename) as f:
-            return [json.loads(line) for line in f]
-    elif filename.endswith(".pkl"):
-        with open(filename, 'rb') as f:
-            return pickle.load(f)
-    else:
-        raise NotImplementedError()
+def run_systematic_infill_causal(args, eval_type = "one_line", result_base_path = None):
+    ...
 
-def evaluate_one_line_systematic(filename):
-    """Reads infilled one-line completions from a file, postprocesses them (truncates them to one line), and evaluates
-    functional correctness (average pass rate / exact match).
+
+def evaluate_systematic(filename: str, truncation_heuristic: str = "num_lines"):
+    """Reads infilled one-line completions from a file, postprocesses them (truncates them to one line or multi-line w/ heuristics),
+    and evaluates functional correctness (average pass rate / exact match).
     """
 
     outputs = read_file(filename)
@@ -115,22 +109,25 @@ def evaluate_one_line_systematic(filename):
             for infill_res in out["infill_results"]:
                 # truncate infill to be one line
                 infill = infill_res["infill"]
-                if infill.startswith("\n"):
-                    if "\n" not in infill[1:]:
-                        infilled_line = infill
-                    else:
-                        infilled_line = infill[:infill[1:].index("\n") + 1]
+                if truncation_heuristic == "num_lines":
+                    infill_truncated = truncate_num_lines(
+                            infill,
+                            max_num_lines = max(1, infill_res["missing_lines"].count("\n"))
+                            )
+                elif truncation_heuristic == "stopwords":
+                    ...
+                elif truncation_heuristic == "suffix":
+                    ...
+                elif truncation_heuristic == "num_lines":
+                    ...
                 else:
-                    if "\n" in infill:
-                        infilled_line = infill[:infill.index("\n") + 1]
-                    else:
-                        infilled_line = infill
+                    raise NotImplementedError()
 
-                # check mismatched indent?
-                is_exact_match = infilled_line.rstrip() == infill_res["missing_lines"].rstrip()
+                # TODO: this strips initial whitespace. could check whether indent is correct?
+                is_exact_match = infill_truncated.rstrip() == infill_res["missing_lines"].rstrip()
 
                 complete = "".join([infill_res["prompt_parts"][0],
-                    infilled_line,
+                    infill_truncated,
                     infill_res["prompt_parts"][1]])
 
                 res = check_correctness(
@@ -172,4 +169,4 @@ if __name__ == "__main__":
 
     if not args.evaluate_only:
         run_systematic_infill(args, eval_type=args.eval_type, result_base_path=args.result_base_path)
-    evaluate_one_line_systematic(f"{result_base_path}.pkl")
+    evaluate_systematic(f"{args.result_base_path}.pkl")

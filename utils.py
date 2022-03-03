@@ -75,3 +75,50 @@ def truncate_docstring_infill(infill: str) -> str:
     # remove trailing whitespace
     infill = infill.strip()
     return infill
+
+def truncate_num_lines(infill: str, max_num_lines: int = 1) -> str:
+    """Truncates infill to up to max number of lines."""
+    if infill.startswith("\n"):
+        infill = infill[1:]
+
+    # already one line
+    if "\n" not in infill:
+        return infill
+    
+    infilled_line = infill[:find_nth(infill, "\n", max_num_lines) + 1]
+    if not infilled_line.count("\n") <= max_num_lines:
+        print(len(infilled_line.split("\n")))
+        print(max_num_lines)
+        import pdb; pdb.set_trace()
+
+    return infilled_line
+
+#        if "\n" not in infill[1:]:
+#            infilled_line = infill
+#        else:
+#            infilled_line = infill[:infill[1:].index("\n") + 1]
+#    else:
+#        if "\n" in infill:
+#            infilled_line = infill[:infill.index("\n") + 1]
+#        else:
+#            infilled_line = infill
+#    return infilled_line
+
+def find_nth(haystack, needle, n):
+    start = haystack.find(needle)
+    while start >= 0 and n > 1:
+        start = haystack.find(needle, start+len(needle))
+        n -= 1
+    return start
+
+def read_file(filename):
+    if filename.endswith(".json"):
+        with open(filename) as f:
+            return [json.loads(line) for line in f]
+    elif filename.endswith(".pkl"):
+        with open(filename, 'rb') as f:
+            return pickle.load(f)
+    else:
+        raise NotImplementedError()
+
+
