@@ -143,7 +143,15 @@ def run_systematic_infill_causal(args,
 
     result_json.close()
 
-def evaluate_systematic(filename: str, truncation_heuristic: str = "num_lines"):
+def rerank_with_right_context(candidate_infills, left_context, right_context):
+    """Reranks infill candidates by adding the left and right context to the candidates.
+
+    Returns: 
+        Sorted list of (score, infill) tuples.
+    """
+    ...
+
+def evaluate_systematic(filename: str, truncation_heuristic: str = "num_lines", rerank_with_right_context: bool = False):
     """Reads infilled one-line completions from a file, postprocesses them (truncates them to one line or multi-line w/ heuristics),
     and evaluates functional correctness (average pass rate / exact match).
     """
@@ -160,21 +168,35 @@ def evaluate_systematic(filename: str, truncation_heuristic: str = "num_lines"):
                 avg_exact = np.mean([x["exact_match"] for x in functional_results])
                 p.set_postfix({'pass': avg_pass, 'exact': avg_exact})
             for infill_res in out["infill_results"]:
-                # truncate infill to be one line
-                infill = infill_res["infill"]
-                if truncation_heuristic == "num_lines":
-                    infill_truncated = truncate_num_lines(
-                            infill,
-                            max_num_lines = max(1, infill_res["missing_lines"].count("\n"))
-                            )
-                elif truncation_heuristic == "stopwords":
-                    ...
-                elif truncation_heuristic == "suffix":
-                    ...
-                elif truncation_heuristic == "num_lines":
-                    ...
+                if rerank_with_right_context:
+                    # Need to postprocess all candidates (and then re-rank)
+                    candidate_infills = infill_res["infill_candidates"]
                 else:
-                    raise NotImplementedError()
+                    if "infill_candidates" in infill_res:
+                        _, top_candidate_text = infill_res["infill_candidates"][0]
+                        candidate_infills = [top_candidate_text]
+                    else:
+                        candidate_infills = [infill_res["infill"]]
+
+                candidate_infills_truncated = []
+                for infill in candidate_infills:
+                    if truncation_heuristic == "num_lines":
+                        infill_truncated = truncate_num_lines(
+                                infill,
+                                max_num_lines = max(1, infill_res["missing_lines"].count("\n"))
+                                )
+                    elif truncation_heuristic == "stopwords":
+                        raise NotImplementedError()
+                    elif truncation_heuristic == "suffix":
+                        raise NotImplementedError()
+                    else:
+                        raise NotImplementedError()
+                    candidate_infills_truncated.append(infill_truncated)
+
+                if rerank_with_right_context:
+                    infill_truncated = rerank_with_right_context(candidate_infills, left_context, right_context)
+                else:
+                    infill_truncated = candidate_infills_truncated[0]
 
                 # TODO: this strips initial whitespace. could check whether indent is correct?
                 is_exact_match = infill_truncated.rstrip() == infill_res["missing_lines"].rstrip()
