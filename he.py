@@ -34,7 +34,7 @@ def combine_responses(list_of_responses):
             responses[problem_id]['choices'].extend(resp[problem_id]['choices'])
     return responses
 
-def generate_he_infill_problems(eval_type="one_line"):
+def generate_he_infill_problems(args, eval_type="one_line"):
     """Masks out a subset of lines in the HumanEval reference solution."""
     assert eval_type in ("one_line", "all_lines")
     problems = list(sorted(read_problems().items()))
@@ -67,6 +67,7 @@ def generate_he_infill_problems(eval_type="one_line"):
                 "num_after": num_after,
                 "missing_lines": missing_lines, 
                 "prompt_parts": prompt_parts,
+                "canonical_solution": problem["canonical_solution"],
             })
         yield task_id, task_id_problems
 

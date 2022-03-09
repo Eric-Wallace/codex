@@ -9,7 +9,9 @@ import os
 import sys
 import pprint
 
-from models import make_model, Model
+from typing import List
+
+from models import TruncationParameters, make_model, Model
 
 from he import HUMAN_EVAL_STOP_WORDS, generate_he_infill_problems
 
@@ -24,7 +26,7 @@ def run_systematic_infill(args, model: Model, eval_type="one_line", result_base_
 
     assert eval_type in ("one_line", "all_lines")
 
-    results = []
+    all_results = []
     if result_base_path is not None:
         result_json_fname = f"{result_base_path}.json"
         result_pkl_fname = f"{result_base_path}.pkl"
@@ -35,47 +37,64 @@ def run_systematic_infill(args, model: Model, eval_type="one_line", result_base_
 
     problem_iterator = generate_he_infill_problems(args, eval_type)
 
+    responses = {}
+
     for i, (task_id, task_id_problems) in enumerate(tqdm.tqdm(problem_iterator, ncols=120)): 
         
         infill_results = []
         for problem in task_id_problems:
+            key = (task_id, problem["num_before"], problem["num_after"])
+
             prompt_parts = problem["prompt_parts"]
-            if args.temperature == 0.0:
-                out = model.infill(prompt_parts, verbose=False, sampling=False)
-            else:
-                out = model.infill(prompt_parts, verbose=False, sampling=True, sampling_topp=args.top_p, sampling_temperature=args.temperature)
-
-            if len(out["infills"]) != 1:
+            if len(prompt_parts) != 2:
                 raise NotImplementedError("multiple region infilling is not implemented")
-            infill = out["infills"][0]
+            else:
+                prefix, suffix = prompt_parts
 
-            complete = ''.join(out["complete"])
+            truncation_parameters = [
+                TruncationParameters.from_heuristics(args.truncation_heuristics, problem["missing_lines"], suffix)
+            ]
+            kwargs = dict(
+                verbose=False, n=args.num_candidates,
+                bidirectional_generation=args.bidirectional_generation, bidirectional_scoring=args.bidirectional_scoring,
+                truncation_parameters=truncation_parameters,
+                scoring=args.candidate_scoring,
+            )
+            # if args.temperature == 0.0:
+            #     # kwargs.update(sampling=False)
+            # else:
+            kwargs.update(sampling=True, top_p=args.top_p, temperature=args.temperature)
+            sorted_choices, response = model.rank_infills(prompt_parts, **kwargs)
+
+            top_choice = sorted_choices[0]
 
             results = problem.copy()
-            results["infill"] = infill
-            results["complete"] = complete
+            
+            assert len(prompt_parts) == 2
+            results["text"] = top_choice["infills"][0]
+            results["complete"] = top_choice["complete"]
+            results["text_untruncated"] = top_choice["infills_untruncated"][0]
+
+            responses[key] = response
 
             infill_results.append(results)
-            # print("="*20)
-            # print("Prompt: ", prompt_parts)
-            # print(out["infills"][0])
 
         result = {
                 "task_id": task_id,
                 "canonical_solution": problem["canonical_solution"],
                 "infill_results": infill_results,
                 }
-        results.append(result)
+        all_results.append(result)
         result_json.write(json.dumps(result) + "\n")
         if i % 10 == 0:
             result_json.flush()
 
     with open(result_pkl_fname, "wb") as f:
-        pickle.dump(results, f)
+        pickle.dump(all_results, f)
 
     result_json.close()
 
-def evaluate_systematic(filename: str, truncation_heuristic: str = "num_lines", rerank_with_right_context: bool = False):
+def evaluate_systematic(filename: str, truncation_heuristics: List[str] = ["num_lines"]):
     """Reads infilled completions from a file, postprocesses them (truncates them to one line or multi-line w/ heuristics),
     and evaluates functional correctness (average pass rate / exact match).
     """
@@ -93,43 +112,16 @@ def evaluate_systematic(filename: str, truncation_heuristic: str = "num_lines", 
                 p.set_postfix({'pass': avg_pass, 'exact': avg_exact})
 
             for infill_res in out["infill_results"]:
-                left_context, right_context = infill_res["prompt_parts"]
-                if rerank_with_right_context:
-                    # Need to postprocess all candidates (and then re-rank)
-                    candidate_infills = infill_res["infill_candidates"]
-                else:
-                    if "infill_candidates" in infill_res:
-                        _, top_candidate_text = infill_res["infill_candidates"][0]
-                        candidate_infills = [top_candidate_text]
-                    else:
-                        candidate_infills = [infill_res["infill"]]
+                prefix, suffix = infill_res["prompt_parts"]
 
-                candidate_infills_truncated = []
-                for infill in candidate_infills:
-                    missing_lines = stripped_line_split(infill_res["missing_lines"])
-                    if truncation_heuristic == "num_lines":
-                        #max_num_lines = max(1, infill_res["missing_lines"].count("\n")
-                        infill_truncated = truncate_num_lines(infill, max_num_lines=len(missing_lines))
-                    elif truncation_heuristic == "stopwords":
-                        raise NotImplementedError()
-                    elif truncation_heuristic == "suffix":
-                        infill_truncated = truncate_overlap(infill, right_context, num_consecutive_lines=4)
-                    elif truncation_heuristic == "suffix+num_lines":
-                        infill_truncated = truncate_overlap(infill, right_context, num_consecutive_lines=4)
-                        infill_truncated = truncate_num_lines(infill_truncated, max_num_lines=len(missing_lines))
-                    else:
-                        raise NotImplementedError()
-                    candidate_infills_truncated.append(infill_truncated)
+                truncation_parameters = TruncationParameters.from_heuristics(truncation_heuristics, infill_res["missing_lines"], suffix)
 
-                if rerank_with_right_context:
-                    infill_truncated = rerank_with_right_context(candidate_infills, left_context, right_context)
-                else:
-                    infill_truncated = candidate_infills_truncated[0]
+                infill_truncated = truncation_parameters.truncate(infill_res["text_untruncated"])
 
                 # TODO: this strips initial whitespace. could check whether indent is correct?
                 is_exact_match = infill_truncated.rstrip() == infill_res["missing_lines"].rstrip()
 
-                complete = "".join([left_context, infill_truncated, right_context])
+                complete = "".join([prefix, infill_truncated, suffix])
 
                 res = check_correctness(
                     problem=problems[out["task_id"]],
@@ -158,7 +150,7 @@ if __name__ == "__main__":
     print(' '.join(sys.argv))
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_path", required=True)
+    parser.add_argument("--model_path")
     parser.add_argument("--tokenizer_name", type=str, choices=["gpt2", "gpt2_pretokenization_newlines_only"])
     parser.add_argument("--prompt_prefix", type=str)
     parser.add_argument("--batch_size", type=int, default=3)
@@ -167,21 +159,23 @@ if __name__ == "__main__":
     parser.add_argument("--evaluate_only", action="store_true")
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top_p", type=float, default=0.95)
-    parser.add_argument("--truncation_heuristic", choices=["num_lines", "suffix", "suffix+num_lines"], default="num_lines")
+    parser.add_argument("--truncation_heuristics", nargs='*', choices=TruncationParameters.HEURISTICS, default=["num_lines"])
+
+    parser.add_argument("--bidirectional_generation", action="store_true")
+    parser.add_argument("--bidirectional_scoring", action="store_true")
 
     # for LTR models
     parser.add_argument("--num_candidates", type=int, default=10)
-    parser.add_argument("--candidate_scoring", choices=["mean", "sum"], default="mean")
+    parser.add_argument("--candidate_scoring", choices=["mean", "sum", "random"], default="mean")
 
     args = parser.parse_args()
     pprint.pprint(vars(args))
 
-    if args.model_name is None:
-        assert args.cached_responses, "must pass --model_path=<model> or --cached_responses"
-        model = Model()
-    else:
-        model = make_model(args, args.model_path, args.tokenizer_name, prompt_prefix=args.prompt_prefix)
-
     if not args.evaluate_only:
+        if args.model_path is None:
+            # assert args.cached_responses, "must pass --model_path=<model> or --cached_responses"
+            model = Model()
+        else:
+            model = make_model(args, args.model_path, args.tokenizer_name, prompt_prefix=args.prompt_prefix)
         run_systematic_infill(args, model, eval_type=args.eval_type, result_base_path=args.result_base_path)
-    evaluate_systematic(f"{args.result_base_path}.pkl", truncation_heuristic=args.truncation_heuristic)
+    evaluate_systematic(f"{args.result_base_path}.pkl", truncation_heuristics=args.truncation_heuristics)

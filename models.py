@@ -12,7 +12,7 @@ try:
 except:
     print("couldn't import torch; won't be able to use most models", file=sys.stderr)
 
-from utils import truncate_overlap, truncate_num_lines
+from utils import truncate_overlap, truncate_num_lines, stripped_line_split
 
 CODEX_RETRY_DELAY_SECONDS = 60
 CODEX_MAX_RETRIES = 30
@@ -21,8 +21,21 @@ _TruncationParameters = namedtuple("_TruncationParameters", ["max_num_lines", "s
 class TruncationParameters(_TruncationParameters):
     SUFFIX_NUM_CONSECUTIVE_LINES = 4
 
-    def __init__(self, max_num_lines=None, suffix=None):
-        return _TruncationParameters(max_num_lines, suffix)
+    HEURISTICS = ["num_lines", "suffix"]
+
+    @staticmethod
+    def from_heuristics(truncation_heuristics: List[str], missing_lines: str, suffix: str):
+        tp = TruncationParameters(None, None)
+        for heuristic in truncation_heuristics:
+            assert heuristic in TruncationParameters.HEURISTICS
+            if heuristic == "num_lines":
+                num_lines = len(stripped_line_split(missing_lines))
+                tp = tp._replace(max_num_lines=num_lines)
+            elif heuristic == "suffix":
+                tp = tp._replace(suffix=suffix)
+            else:
+                raise NotImplementedError(f"heuristic {heuristic}")
+        return tp
 
     def truncate(self, infill: str):
         """
@@ -40,11 +53,38 @@ class Model:
         raise NotImplementedError()
 
     def complete(self, prompt: str, stop_words: List[str], **kwargs):
-        raise NotImplementedError()
+        text = 'DUMMY'
+        choice = {
+            'text': text,
+            'logprobs': {
+                'token_logprobs': None,
+                'tokens': None,
+            },
+        }
+
+        return {
+            'prompt': prompt,
+            'choices': [choice] * kwargs.get("n", 1),
+        }
 
     def infill(self, parts: List[str], verbose=False, **kwargs):
         # fill in text between each string in parts
-        raise NotImplementedError
+        infill = 'DUMMY'
+        choice = {
+            'complete': [parts[0], infill, parts[1]],
+            'infills_untruncated': [infill],
+            'ids': None,
+            'raw': None,
+            'logprobs': {
+                'token_logprobs': None,
+                'tokens': None,
+            },
+        }
+
+        return {
+            'prompt_parts': parts,
+            'choices': [choice] * kwargs.get("n", 1),
+        }
 
     def score_text(self, text):
         # get the log probability of producing the given text autoregressively
@@ -91,21 +131,27 @@ class Model:
 
         if cached_response is None:
             if bidirectional_generation:
-                response = self.infill([prefix, suffix], verbose=verbose, **kwargs)
+                response = self.infill([prefix, suffix], truncation_parameters=[trunc_params], verbose=verbose, **kwargs)
             else:
                 response = self.complete(prefix, stop_words=[], **kwargs)
             choices = []
             for choice in response['choices']:
-                text = trunc_params(choice['text'])
+                if bidirectional_generation:
+                    infills_untruncated = choice['infills_untruncated']
+                else:
+                    infills_untruncated = [choice['text']]
+                assert len(infills_untruncated) == 1
+                text_untruncated = infills_untruncated[0]
+                text = trunc_params.truncate(text_untruncated)
                 if verbose:
                     print(f"--prefix:--\n{prefix}")
                     print(f"--infill (truncated):--\n{text}")
-                    print(f"--infill (untruncated):--\n{choice['text']}")
+                    print(f"--infill (untruncated):--\n{text_untruncated}")
                     print(f"--suffix:--\n{suffix}")
                 d = {
-                    'text': text,
                     'complete': '\n'.join([prefix, text, suffix]),
                     'infills': [text],
+                    'infills_untruncated': infills_untruncated,
                     'logprobs': {
                         'token_logprobs': None,
                         'tokens': None,
@@ -142,11 +188,14 @@ class HFModel(Model):
     def encode_stop_words(self, stop_words: List[str]):
         return [self.lm_tokenizer.encode(string) for string in stop_words]
 
-    def complete(self, prompt, stop_words: List[str], max_tokens=450, top_p=0.95, n=1, num_log_probs=1, temperature=0.6):
+    def complete(self, prompt, stop_words: List[str], sampling=True, max_tokens=450, top_p=0.95, n=1, num_log_probs=1, temperature=0.6):
         ''' This function runs GPT-2 locally using HF transformers but places the outputs into an json that looks just like the one
         provided by the OpenAI API. '''
 
         batch_size = n if self.batch_size is None else self.batch_size
+
+        if not sampling:
+            raise NotImplementedError()
 
         assert isinstance(prompt, str)
         prompt = [prompt] # below code assumes list
@@ -284,11 +333,14 @@ class FairseqModel(Model):
         # tokens: torch.tensor
         return self.lm_model.decode(tokens)
 
-    def complete(self, prompt: str, stop_words: List[str], max_tokens=450, top_p=0.95, n=1, num_log_probs=1, temperature=0.6):
+    def complete(self, prompt: str, stop_words: List[str], sampling=True, max_tokens=450, top_p=0.95, n=1, num_log_probs=1, temperature=0.6):
         ''' This function runs fairseq LM locally but places the outputs into an json that looks just like the one
         provided by the OpenAI API. '''
 
         batch_size = n if self.batch_size is None else self.batch_size
+
+        if not sampling:
+            raise NotImplementedError()
 
         if num_log_probs != 1:
             raise NotImplementedError()
@@ -399,6 +451,9 @@ class CausalMasking(FairseqModel):
     def make_sentinel(i):
         return f"<sentinel:{i}>"
 
+    def sentinel_id(self, i):
+        return self.tokenizer.token_to_id(self.make_sentinel(i)) + self.TOKENIZER_OFFSET
+
     @property
     def _sentinel_tokens(self):
         return [CausalMasking.make_sentinel(i) for i in range(256)]
@@ -434,12 +489,19 @@ class CausalMasking(FairseqModel):
         # Force the model to fill in code in between each string in parts
         # see code_to_docstring and docstring_to_code for example usages
         if truncation_parameters is None:
-            truncation_parameters = [TruncationParameters() for _ in parts[:-1]]
+            truncation_parameters = [TruncationParameters(None, None) for _ in parts[:-1]]
 
         assert len(truncation_parameters) == len(parts) - 1
-        model = self.model
+        model = self.lm_model
         assert isinstance(parts, list)
         assert len(parts) > 1
+
+        if self.prompt_prefix is not None:
+            raise NotImplementedError()
+            # TODO: add option to not insert newline
+            parts = parts.copy()
+            parts[0] = f"{self.prompt_prefix}\n{parts[0]}"
+
         infills = []
 
         ids = []
@@ -511,7 +573,7 @@ class CausalMasking(FairseqModel):
 
         choice = {
             'complete': complete,
-            'infills': infills,
+            'infills_untruncated': infills,
             'ids': ids,
             'raw': self._decode(ids),
             'logprobs': {
