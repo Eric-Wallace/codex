@@ -1,4 +1,6 @@
 from typing import List, Tuple
+import pickle
+import json
 
 TRIPLE_QUOTE = '"""'
 SINGLE_TRIPLE_QUOTE = "'''"
@@ -78,20 +80,23 @@ def truncate_docstring_infill(infill: str) -> str:
 
 def truncate_num_lines(infill: str, max_num_lines: int = 1) -> str:
     """Truncates infill to up to max number of lines."""
-    if infill.startswith("\n"):
-        infill = infill[1:]
+    infill_lines = infill.strip("\n").split("\n")
 
-    # already one line
-    if "\n" not in infill:
-        return infill
+    return "\n".join(infill_lines[:max_num_lines])
+    # if infill.startswith("\n"):
+    #     infill = infill[1:]
+
+    # # already one line
+    # if "\n" not in infill:
+    #     return infill
     
-    infilled_line = infill[:find_nth(infill, "\n", max_num_lines) + 1]
-    if not infilled_line.count("\n") <= max_num_lines:
-        print(len(infilled_line.split("\n")))
-        print(max_num_lines)
-        import pdb; pdb.set_trace()
+    # infilled_line = infill[:find_nth(infill, "\n", max_num_lines) + 1]
+    # if not infilled_line.count("\n") <= max_num_lines:
+    #     print(len(infilled_line.split("\n")))
+    #     print(max_num_lines)
+    #     import pdb; pdb.set_trace()
 
-    return infilled_line
+    # return infilled_line
 
 #        if "\n" not in infill[1:]:
 #            infilled_line = infill
@@ -103,6 +108,23 @@ def truncate_num_lines(infill: str, max_num_lines: int = 1) -> str:
 #        else:
 #            infilled_line = infill
 #    return infilled_line
+
+def stripped_line_split(text):
+    return text.strip("\n").split("\n")
+
+def truncate_overlap(infill, suffix, num_consecutive_lines=4):
+    infill_lines = stripped_line_split(infill)
+    suffix_lines = stripped_line_split(suffix)
+
+    num_suffix_lines = len(suffix_lines)
+
+    suffix_lines = suffix_lines[:num_consecutive_lines]
+    if suffix_lines:
+        for i in range(len(infill_lines)):
+            if infill_lines[i:i+len(suffix_lines)] == suffix_lines:
+                #print(" ||| ".join(suffix_lines))
+                return "\n".join(infill_lines[:i])
+    return infill
 
 def find_nth(haystack, needle, n):
     start = haystack.find(needle)
@@ -120,5 +142,3 @@ def read_file(filename):
             return pickle.load(f)
     else:
         raise NotImplementedError()
-
-

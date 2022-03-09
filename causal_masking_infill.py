@@ -45,7 +45,6 @@ class InfillingModel:
         # set the max generation length
         model.cfg.generation['max_len_b'] = 500
 
-
         self.EOSS_ID = tokenizer.token_to_id(self.EOSS) + self.TOKENIZER_OFFSET
 
     def encode(self, s):

@@ -9,6 +9,8 @@ from collections import defaultdict
 
 from human_eval.data import write_jsonl, read_problems
 
+from utils import build_systematic_infill_prompt
+
 from models import make_model, Model
 
 # can't include print since the codex API will only handle up to 4 stop words
@@ -31,6 +33,43 @@ def combine_responses(list_of_responses):
                 responses[problem_id] = {'choices': []}
             responses[problem_id]['choices'].extend(resp[problem_id]['choices'])
     return responses
+
+def generate_he_infill_problems(eval_type="one_line"):
+    """Masks out a subset of lines in the HumanEval reference solution."""
+    assert eval_type in ("one_line", "all_lines")
+    problems = list(sorted(read_problems().items()))
+
+    for i, (task_id, problem) in enumerate(problems):
+        soln = problem["canonical_solution"].rstrip() # note we strip extra newlines
+        num_lines = len(soln.split("\n"))
+        
+        num_lines_to_mask = []        
+        if eval_type == "one_line":
+            for num_before in range(0, num_lines):
+                num_lines_to_mask.append((num_before, num_lines - num_before - 1))
+        else:
+            for num_before in range(0, num_lines):
+                for num_after in range(0, num_lines - num_before):
+                    num_lines_to_mask.append((num_before, num_after))
+
+        task_id_problems = []
+
+        for num_before, num_after in num_lines_to_mask:
+            prompt_parts, missing_lines = build_systematic_infill_prompt(
+                    problem["prompt"],
+                    soln,
+                    num_before,
+                    num_after)
+            
+            task_id_problems.append({
+                "task_id": task_id,
+                "num_before": num_before,
+                "num_after": num_after,
+                "missing_lines": missing_lines, 
+                "prompt_parts": prompt_parts,
+            })
+        yield task_id, task_id_problems
+
 
 if __name__ == "__main__":
     print(' '.join(sys.argv))

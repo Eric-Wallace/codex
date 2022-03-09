@@ -1,5 +1,6 @@
 import os
 import time
+from unicodedata import bidirectional
 import numpy as np
 from typing import List
 import random
@@ -11,8 +12,28 @@ try:
 except:
     print("couldn't import torch; won't be able to use most models", file=sys.stderr)
 
+from utils import truncate_overlap, truncate_num_lines
+
 CODEX_RETRY_DELAY_SECONDS = 60
 CODEX_MAX_RETRIES = 30
+
+_TruncationParameters = namedtuple("_TruncationParameters", ["max_num_lines", "suffix"])
+class TruncationParameters(_TruncationParameters):
+    SUFFIX_NUM_CONSECUTIVE_LINES = 4
+
+    def __init__(self, max_num_lines=None, suffix=None):
+        return _TruncationParameters(max_num_lines, suffix)
+
+    def truncate(self, infill: str):
+        """
+        Truncate an infill either to the maximum
+        """
+        infill_truncated = infill
+        if self.suffix is not None:
+            infill_truncated = truncate_overlap(infill, self.suffix, num_consecutive_lines=self.SUFFIX_NUM_CONSECUTIVE_LINES)
+        if self.max_num_lines is not None:
+            infill_truncated = truncate_num_lines(infill_truncated, max_num_lines=self.max_num_lines)
+        return infill_truncated
 
 class Model:
     def encode_stop_words(self, stop_words: List[str]):
@@ -21,27 +42,86 @@ class Model:
     def complete(self, prompt: str, stop_words: List[str], **kwargs):
         raise NotImplementedError()
 
-    def rank_completions(self, prompt: str, stop_words: List[str], cached_response=None, scoring='mean', **kwargs):
+    def infill(self, parts: List[str], verbose=False, **kwargs):
+        # fill in text between each string in parts
+        raise NotImplementedError
+
+    def score_text(self, text):
+        # get the log probability of producing the given text autoregressively
+        # TODO: implement this for subclasses
+        raise NotImplementedError()
+
+    def _rank_helper(self, choices, scoring):
         assert scoring in ['mean', 'sum', 'random']
-        if cached_response is None:
-            response = self.complete(prompt, stop_words, **kwargs)
-        else:
-            response = cached_response
-        def scoring_fn(token_logprobs):
+        def scoring_fn(choice):
+            if scoring == 'random':
+                return random.random()
+            token_logprobs = choice['logprobs']['token_logprobs']
             token_logprobs = np.array(token_logprobs)
             if scoring =='mean':
                 return token_logprobs.mean()
             elif scoring == 'sum':
                 return token_logprobs.sum()
-            elif scoring == 'random':
-                return random.random()
             else:
                 raise NotImplementedError(f"scoring {scoring}")
-        scored_choices = [
-            (scoring_fn(choice['logprobs']['token_logprobs']), choice['text'])
-            for choice in response['choices']
-        ]
-        return list(sorted(scored_choices, reverse=True)), response
+        return list(sorted(choices, key=scoring_fn, reverse=True))
+
+    def rank_completions(self, prompt: str, stop_words: List[str], cached_response=None, scoring='mean', **kwargs):
+        if cached_response is None:
+            response = self.complete(prompt, stop_words, **kwargs)
+        else:
+            response = cached_response
+        sorted_choices = self._rank_helper(response['choices'], scoring=scoring)
+        return sorted_choices, response
+
+    def rank_infills(self, parts: List[str], verbose=False, bidirectional_scoring=False, bidirectional_generation=False,
+                     cached_response=None, scoring='mean',
+                     truncation_parameters: List[TruncationParameters] = None, **kwargs):
+        if truncation_parameters is None:
+            truncation_parameters = [TruncationParameters() for _ in parts[:-1]]
+        assert len(truncation_parameters) == len(parts) - 1
+
+        if len(parts) != 2:
+            # TODO: implement this
+            raise NotImplementedError()
+        else:
+            prefix = parts[0]
+            suffix = parts[1]
+            trunc_params = truncation_parameters[0]
+
+        if cached_response is None:
+            if bidirectional_generation:
+                response = self.infill([prefix, suffix], verbose=verbose, **kwargs)
+            else:
+                response = self.complete(prefix, stop_words=[], **kwargs)
+            choices = []
+            for choice in response['choices']:
+                text = trunc_params(choice['text'])
+                if verbose:
+                    print(f"--prefix:--\n{prefix}")
+                    print(f"--infill (truncated):--\n{text}")
+                    print(f"--infill (untruncated):--\n{choice['text']}")
+                    print(f"--suffix:--\n{suffix}")
+                d = {
+                    'text': text,
+                    'complete': '\n'.join([prefix, text, suffix]),
+                    'infills': [text],
+                    'logprobs': {
+                        'token_logprobs': None,
+                        'tokens': None,
+                    }
+                }
+                choices.append(d)
+        else:
+            response = cached_response
+            choices = response['choices']
+
+        if bidirectional_scoring:
+            raise NotImplementedError()
+        
+        sorted_choices = self._rank_helper(choices, scoring)
+
+        return sorted_choices, response
 
 class HFModel(Model):
     def __init__(self, model_name, tokenizer_name=None, prompt_prefix=None, batch_size=None):
@@ -224,6 +304,7 @@ class FairseqModel(Model):
         choices = []
         with torch.no_grad():
             lm_model.cfg.generation['max_len_b'] = max_tokens
+            lm_model.cfg.generation['unnormalized'] = True
 
             encoded_prompt = self._encode(prompt)
             prompt_len = len(encoded_prompt)
@@ -305,6 +386,7 @@ class FairseqModel(Model):
 
             choices.append(curr_json)
 
+        # {'choices': [{'text': text, 'logprobs': ... }]}
         return_json['choices'] = choices
         return return_json
 
@@ -347,6 +429,101 @@ class CausalMasking(FairseqModel):
     def _decode(self, tokens):
         token_ids = torch.tensor(tokens)
         return self.tokenizer.decode((token_ids - self.TOKENIZER_OFFSET).tolist(), skip_special_tokens=False)
+
+    def infill(self, parts: List[str], verbose=False, n=1, truncation_parameters: List[TruncationParameters]=None, **kwargs):
+        # Force the model to fill in code in between each string in parts
+        # see code_to_docstring and docstring_to_code for example usages
+        if truncation_parameters is None:
+            truncation_parameters = [TruncationParameters() for _ in parts[:-1]]
+
+        assert len(truncation_parameters) == len(parts) - 1
+        model = self.model
+        assert isinstance(parts, list)
+        assert len(parts) > 1
+        infills = []
+
+        ids = []
+        
+        if n != 1:
+            raise NotImplementedError()
+
+        # encode parts separated by sentinel
+        for sentinel_ix, part in enumerate(parts):
+            part_tokens = self._encode(part)
+            ids.extend(part_tokens.tolist())
+            if sentinel_ix < len(parts) - 1:
+                ids.append(self.sentinel_id(sentinel_ix))
+
+        infills = []
+
+        complete = []
+
+        infill_scores = []
+        infill_tokens = []
+
+        # autoregressively fill in
+        for sentinel_ix, part in enumerate(parts[:-1]):
+            ids.append(self.sentinel_id(sentinel_ix))
+            if verbose:
+                print(part, end="")
+                print(f"<sentinel:{sentinel_ix}>", end="")
+            with torch.no_grad():
+                outputs = model.generate([torch.tensor(ids)], **kwargs)
+                completion = outputs[0][0]['tokens'].tolist()
+                scores = outputs[0][0]['positional_scores']
+                if completion[-1] == 2:
+                    completion = completion[:-1]
+                    scores = scores[:-1]
+
+            completion = completion[len(ids):]
+            scores = scores[len(ids):]
+
+            if self.EOSS_ID in completion:
+                t = completion.index(self.EOSS_ID)+1
+                completion = completion[:t]
+                scores = scores[:t]
+                # TODO: handle this better: we do want to include the score for EOSS (if we use these scores somewhere)
+                # but how do we handle the case where EOSS is not present (below) without biasing toward those candidates?
+                scores = scores[:-1]
+            else:
+                if not verbose:
+                    print(f"warning: {self.EOSS} not found", file=sys.stderr)
+                completion = completion + [self.EOSS_ID]
+
+            ids.extend(completion)
+
+            infill_tokens.append(completion[:-1])
+            infill_scores.append(scores)
+
+            decoded = self._decode(completion[:-1])
+            complete.append(part)
+            complete.append(decoded)
+            infills.append(decoded)
+
+        complete.append(parts[-1])
+
+        # if verbose:
+        #     print(parts[-1])
+        #     print("-"*20)
+        #     print(''.join((complete)))
+
+        decoded_tokens = [ [self._decode([t]) for t in completion] for completion in infill_tokens]
+
+        choice = {
+            'complete': complete,
+            'infills': infills,
+            'ids': ids,
+            'raw': self._decode(ids),
+            'logprobs': {
+                'token_logprobs': infill_scores,
+                'tokens': decoded_tokens,
+            },
+        }
+
+        return {
+            'prompt_parts': parts,
+            'choices': [choice],
+        }
 
 
 class CodeGPT2(Model):
