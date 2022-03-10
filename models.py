@@ -171,7 +171,6 @@ class Model:
             choices.append(d)
 
         if bidirectional_scoring:
-            print("bidirectional_scoring")
             completes = [choice['complete'] for choice in choices]
             scores = self.score_text(completes, scoring=scoring)
             assert len(scores) == len(choices)

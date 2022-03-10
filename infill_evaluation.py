@@ -124,8 +124,8 @@ def eval_result(task_id, problem, truncation_heuristics, infill_result):
     infill_truncated = truncation_parameters.truncate(infill_result["text_untruncated"])
     # TODO: this strips initial whitespace. could check whether indent is correct?
     is_exact_match = infill_truncated.rstrip() == infill_result["missing_lines"].rstrip()
-    complete = "\n".join([prefix, infill_truncated, suffix]).lstrip(problem["prompt"])
-    res = check_correctness(problem=problem, completion=complete, timeout=3.0)
+    complete = "\n".join([prefix, infill_truncated, suffix])
+    res = check_correctness(problem=problem, completion=complete, timeout=3.0, include_prompt=False)
     return {
         "task_id": task_id,
         "num_before": infill_result["num_before"],
