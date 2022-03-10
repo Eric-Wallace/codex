@@ -583,6 +583,8 @@ class CausalMasking(FairseqModel):
                 print(part, end="")
                 print(f"<sentinel:{sentinel_ix}>", end="")
             with torch.no_grad():
+                print("completing: ")
+                print(self._decode(ids))
                 if temperature == 0:
                     assert n==1
                     outputs = model.generate(
@@ -594,6 +596,8 @@ class CausalMasking(FairseqModel):
                         [torch.tensor(ids)], sampling=True, beam=n, sampling_topp=top_p, temperature=temperature,
                     )
                 completion = outputs[0][0]['tokens'].tolist()
+                print("completed:")
+                print(completion)
                 scores = outputs[0][0]['positional_scores']
                 if completion[-1] == 2:
                     completion = completion[:-1]
@@ -632,6 +636,9 @@ class CausalMasking(FairseqModel):
         #     print(''.join((complete)))
 
         # decoded_tokens = [ [self._decode([t]) for t in completion] for completion in infill_tokens]
+        print("complete:")
+        print(complete)
+        print()
 
         choice = {
             'complete': complete,
@@ -699,7 +706,26 @@ class OpenAIModel(Model):
     def encode_stop_words(self, stop_words: List[str]):
         return stop_words
 
-    def complete(self, prompt, stop_words, max_tokens=450, top_p=0.95, temperature=0.6, **kwargs):
+    def score_text(self, text_batch: List[str], scoring: str):
+        all_scores = []
+        for text in text_batch:
+            response = self.complete(text, None, max_tokens=0, temperature=1.0, echo=True)
+            choice = response['choices'][0]
+            log_probs = choice["logprobs"]['token_logprobs'][1:]
+            if scoring == 'sum':
+                score = np.sum(log_probs)
+            elif scoring == 'mean':
+                score = np.mean(log_probs)
+            else:
+                raise NotImplementedError(f"scoring {scoring}")
+            all_scores.append(score)
+        return all_scores
+
+    def complete(self, prompt, stop_words, max_tokens=450, top_p=0.95, temperature=0.6, sampling=True, **kwargs):
+        if stop_words == []:
+            stop_words = None
+        if not sampling:
+            raise NotImplementedError()
         import openai
         from secret import API_KEY
         openai.api_key = API_KEY
@@ -712,7 +738,7 @@ class OpenAIModel(Model):
                 raise Exception("max number of retries failed")
             try:
                 response = openai.Completion.create(
-                    engine="davinci-codex",
+                    engine=self.engine,
                     prompt=prompt,
                     stop=stop_words,
                     logprobs=1,
