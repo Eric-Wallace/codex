@@ -87,9 +87,9 @@ class Model:
             'choices': [choice] * kwargs.get("n", 1),
         }
 
-    def score_text(self, text):
+    def score_text(self, text_batch: List[str], scoring: str):
         # get the log probability of producing the given text autoregressively
-        # TODO: implement this for subclasses
+        assert scoring in ['mean', 'sum']
         raise NotImplementedError()
 
     def _rank_helper(self, choices, scoring):
@@ -107,19 +107,20 @@ class Model:
                 raise NotImplementedError(f"scoring {scoring}")
         return list(sorted(choices, key=scoring_fn, reverse=True))
 
-    def rank_completions(self, prompt: str, stop_words: List[str], cached_response=None, scoring='mean', **kwargs):
+    def rank_completions(self, prompt: str, stop_words: List[str], cached_response=None, scoring='mean', sampling=True, temperature=0.6, top_p=0.95, n=1, max_tokens=128):
         if cached_response is None:
-            response = self.complete(prompt, stop_words, **kwargs)
+            response = self.complete(prompt, stop_words, sampling=sampling, temperature=temperature, top_p=top_p, n=n, max_tokens=max_tokens)
         else:
             response = cached_response
         sorted_choices = self._rank_helper(response['choices'], scoring=scoring)
         return sorted_choices, response
 
     def rank_infills(self, parts: List[str], verbose=False, bidirectional_scoring=False, bidirectional_generation=False,
-                     cached_response=None, scoring='mean',
-                     truncation_parameters: List[TruncationParameters] = None, **kwargs):
+                    cached_response=None, scoring='mean',
+                    truncation_parameters: List[TruncationParameters] = None,
+                    sampling=True, temperature=0.6, top_p=0.95, n=1, max_tokens=128):
         if truncation_parameters is None:
-            truncation_parameters = [TruncationParameters() for _ in parts[:-1]]
+            truncation_parameters = [TruncationParameters(None, None) for _ in parts[:-1]]
         assert len(truncation_parameters) == len(parts) - 1
 
         if len(parts) != 2:
@@ -132,36 +133,42 @@ class Model:
 
         if cached_response is None:
             if bidirectional_generation:
-                response = self.infill([prefix, suffix], truncation_parameters=[trunc_params], verbose=verbose, **kwargs)
+                response = self.infill([prefix, suffix], truncation_parameters=[trunc_params], verbose=verbose, sampling=sampling, temperature=temperature, top_p=top_p, n=n, max_tokens=max_tokens)
             else:
-                response = self.complete(prefix, stop_words=[], **kwargs)
-            choices = []
-            for choice in response['choices']:
-                if bidirectional_generation:
-                    infills_untruncated = choice['infills_untruncated']
-                else:
-                    infills_untruncated = [choice['text']]
-                assert len(infills_untruncated) == 1
-                text_untruncated = infills_untruncated[0]
-                text = trunc_params.truncate(text_untruncated)
-                if verbose:
-                    print(f"--prefix:--\n{prefix}")
-                    print(f"--infill (truncated):--\n{text}")
-                    print(f"--infill (untruncated):--\n{text_untruncated}")
-                    print(f"--suffix:--\n{suffix}")
-                d = {
-                    'complete': '\n'.join([prefix, text, suffix]),
-                    'infills': [text],
-                    'infills_untruncated': infills_untruncated,
-                    'logprobs': {
-                        'token_logprobs': None,
-                        'tokens': None,
-                    }
-                }
-                choices.append(d)
+                response = self.complete(prefix, stop_words=[], sampling=sampling, temperature=temperature, top_p=top_p, n=n, max_tokens=max_tokens)
         else:
             response = cached_response
-            choices = response['choices']
+
+        choices = []
+        for choice in response['choices']:
+            if bidirectional_generation:
+                infills_untruncated = choice['infills_untruncated']
+            else:
+                infills_untruncated = [choice['text']]
+            assert len(infills_untruncated) == 1
+            text_untruncated = infills_untruncated[0]
+            text = trunc_params.truncate(text_untruncated)
+            if verbose:
+                print(f"--prefix:--\n{prefix}")
+                print(f"--infill (truncated):--\n{text}")
+                print(f"--infill (untruncated):--\n{text_untruncated}")
+                print(f"--suffix:--\n{suffix}")
+
+            def maybe_append_newline(s):
+                if not s.endswith("\n"):
+                    return s + "\n"
+                return s
+            
+            d = {
+                'complete': ''.join([maybe_append_newline(prefix), maybe_append_newline(text), suffix]),
+                'infills': [text],
+                'infills_untruncated': infills_untruncated,
+                'logprobs': {
+                    'token_logprobs': None,
+                    'tokens': None,
+                }
+            }
+            choices.append(d)
 
         if bidirectional_scoring:
             raise NotImplementedError()
@@ -189,7 +196,7 @@ class HFModel(Model):
     def encode_stop_words(self, stop_words: List[str]):
         return [self.lm_tokenizer.encode(string) for string in stop_words]
 
-    def complete(self, prompt, stop_words: List[str], sampling=True, max_tokens=450, top_p=0.95, n=1, num_log_probs=1, temperature=0.6):
+    def complete(self, prompt, stop_words: List[str], sampling=True, max_tokens=128, top_p=0.95, n=1, num_log_probs=1, temperature=0.6):
         ''' This function runs GPT-2 locally using HF transformers but places the outputs into an json that looks just like the one
         provided by the OpenAI API. '''
 
@@ -345,7 +352,32 @@ class FairseqModel(Model):
         # tokens: torch.tensor
         return self.lm_model.decode(tokens)
 
-    def complete(self, prompt: str, stop_words: List[str], sampling=True, max_tokens=450, top_p=0.95, n=1, num_log_probs=1, temperature=0.6):
+    def score_text(self, text_batch: List[str], scoring: str='sum'):
+        tokens = [self._encode(text) for text in text_batch]
+        return self.score_tokens(tokens, scoring)
+
+    def score_tokens(self, tokens_batch: List[torch.tensor], scoring='sum'):
+        # not sure if passing temperature here does anything, but it shouldn't hurt
+        all_scores = []
+
+        i = 0
+        while len(all_scores) < len(tokens_batch):
+            subbatch = tokens_batch[i:i+self.batch_size]
+            i += self.batch_size
+            ret_vals = self.lm_model.generate(subbatch, score_reference=True, temperature=1.0)
+            for ret_val in ret_vals:
+                assert len(ret_val) == 1
+                log_probs = ret_val[0]['positional_scores']
+                if scoring == 'sum':
+                    score = log_probs.sum()
+                elif scoring == 'mean':
+                    score = log_probs.mean()
+                else:
+                    raise NotImplementedError(f"scoring {scoring}")
+                all_scores.append(score.item())
+        return all_scores
+
+    def complete(self, prompt: str, stop_words: List[str], sampling=True, max_tokens=128, top_p=0.95, n=1, num_log_probs=1, temperature=0.6):
         ''' This function runs fairseq LM locally but places the outputs into an json that looks just like the one
         provided by the OpenAI API. '''
 
@@ -367,15 +399,15 @@ class FairseqModel(Model):
 
         choices = []
         with torch.no_grad():
-            lm_model.cfg.generation['max_len_b'] = max_tokens
 
             encoded_prompt = self._encode(prompt)
             prompt_len = len(encoded_prompt)
 
+            lm_model.cfg.generation['max_len_b'] = max_tokens + prompt_len
+
             if False:
                 # prepend EOS
                 encoded_prompt = torch.cat((torch.tensor(2).unsqueeze(-1), encoded_prompt))
-
 
             completions = []
             while len(completions) < n:
@@ -477,8 +509,8 @@ class CausalMasking(FairseqModel):
     def _extra_stop_words(self):
         return super()._extra_stop_words + self._special_tokens
 
-    def __init__(self, args, model_path: str, bpe="gpt2_pretokenization_newlines_only", gpt2_encoder_json=None, gpt2_vocab_bpe=None, prompt_prefix=None, batch_size=None):
-        super().__init__(args, model_path, bpe, gpt2_encoder_json, gpt2_vocab_bpe, prompt_prefix, batch_size=batch_size)
+    def __init__(self, args, model_path: str, bpe="gpt2_pretokenization_newlines_only", gpt2_encoder_json=None, gpt2_vocab_bpe=None, prompt_prefix=None, batch_size=None, model=None):
+        super().__init__(args, model_path, bpe, gpt2_encoder_json, gpt2_vocab_bpe, prompt_prefix, batch_size=batch_size, model=model)
         assert bpe in {"gpt2_pretokenization_newlines_only", "bpe"}
         from tokenizers import ByteLevelBPETokenizer
         self.tokenizer = tokenizer = ByteLevelBPETokenizer.from_file(
@@ -498,7 +530,7 @@ class CausalMasking(FairseqModel):
         token_ids = torch.tensor(tokens)
         return self.tokenizer.decode((token_ids - self.TOKENIZER_OFFSET).tolist(), skip_special_tokens=False)
 
-    def infill(self, parts: List[str], verbose=False, n=1, truncation_parameters: List[TruncationParameters]=None, sampling=True, max_tokens=450, top_p=0.95, temperature=0.0):
+    def infill(self, parts: List[str], verbose=False, n=1, truncation_parameters: List[TruncationParameters]=None, sampling=True, max_tokens=128, top_p=0.95, temperature=0.0):
         # Force the model to fill in code in between each string in parts
         # see code_to_docstring and docstring_to_code for example usages
         if truncation_parameters is None:
@@ -511,7 +543,6 @@ class CausalMasking(FairseqModel):
 
         if self.prompt_prefix is not None:
             raise NotImplementedError()
-            # TODO: add option to not insert newline
             parts = parts.copy()
             parts[0] = f"{self.prompt_prefix}\n{parts[0]}"
 
@@ -691,16 +722,16 @@ class OpenAIModel(Model):
                 time.sleep(CODEX_RETRY_DELAY_SECONDS)
         return response
 
-def make_model(args, model_name, tokenizer_name=None, prompt_prefix=None):
+def make_model(args, model_name, tokenizer_name=None, prompt_prefix=None, cached_model=None):
     if 'davinci' in model_name or 'cushman' in model_name:
         if prompt_prefix is not None:
             raise NotImplementedError()
         return OpenAIModel(model_name, persistent=True)
     elif 'fairseq' or '/checkpoint' in model_name:
         if 'cm-' in model_name:
-            return CausalMasking(args, model_name, prompt_prefix=prompt_prefix, batch_size=args.batch_size)
+            return CausalMasking(args, model_name, prompt_prefix=prompt_prefix, batch_size=args.batch_size, model=cached_model)
         elif 'lm-' in model_name:
-            return FairseqModel(args, model_name, prompt_prefix=prompt_prefix, batch_size=args.batch_size)
+            return FairseqModel(args, model_name, prompt_prefix=prompt_prefix, batch_size=args.batch_size, model=cached_model)
         elif 'gpt-j' in model_name:
             if prompt_prefix is not None:
                 raise NotImplementedError()

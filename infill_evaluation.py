@@ -9,6 +9,8 @@ import os
 import sys
 import pprint
 
+import argparse
+
 from typing import List
 
 from models import TruncationParameters, make_model, Model
@@ -62,6 +64,10 @@ def run_systematic_infill(args, model: Model, eval_type="one_line", result_base_
                 truncation_parameters=truncation_parameters,
                 scoring=args.candidate_scoring,
             )
+            if args.max_tokens is not None:
+                kwargs['max_tokens'] = args.max_tokens
+            elif eval_type == "one_line":
+                kwargs['max_tokens'] = 30
             # if args.temperature == 0.0:
             #     # kwargs.update(sampling=False)
             # else:
@@ -125,7 +131,7 @@ def evaluate_systematic(filename: str, truncation_heuristics: List[str] = ["num_
                 # TODO: this strips initial whitespace. could check whether indent is correct?
                 is_exact_match = infill_truncated.rstrip() == infill_res["missing_lines"].rstrip()
 
-                complete = "".join([prefix, infill_truncated, suffix])
+                complete = "\n".join([prefix, infill_truncated, suffix])
 
                 res = check_correctness(
                     problem=problems[out["task_id"]],
@@ -150,9 +156,7 @@ def evaluate_systematic(filename: str, truncation_heuristics: List[str] = ["num_
     # with open(f"{ext_stripped}__functional_eval.json", "w") as f:
     #     json.dump(functional_results, f)
 
-if __name__ == "__main__":
-    print(' '.join(sys.argv))
-    import argparse
+def make_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_path")
     parser.add_argument("--tokenizer_name", type=str, choices=["gpt2", "gpt2_pretokenization_newlines_only"])
@@ -161,8 +165,12 @@ if __name__ == "__main__":
     parser.add_argument("--result_base_path")
     parser.add_argument("--eval_type", choices=["one_line", "all_lines"], default="one_line")
     parser.add_argument("--evaluate_only", action="store_true")
+
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top_p", type=float, default=0.95)
+    parser.add_argument("--unnormalized", action="store_true")
+    parser.add_argument("--max_tokens", type=int)
+
     parser.add_argument("--truncation_heuristics", nargs='*', choices=TruncationParameters.HEURISTICS, default=["num_lines"])
 
     parser.add_argument("--bidirectional_generation", action="store_true")
@@ -171,7 +179,12 @@ if __name__ == "__main__":
     # for LTR models
     parser.add_argument("--num_candidates", type=int, default=10)
     parser.add_argument("--candidate_scoring", choices=["mean", "sum", "random"], default="mean")
+    return parser
 
+
+if __name__ == "__main__":
+    print(' '.join(sys.argv))
+    parser = make_parser()
     args = parser.parse_args()
     pprint.pprint(vars(args))
 

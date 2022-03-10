@@ -80,7 +80,7 @@ def truncate_docstring_infill(infill: str) -> str:
 
 def truncate_num_lines(infill: str, max_num_lines: int = 1) -> str:
     """Truncates infill to up to max number of lines."""
-    infill_lines = infill.strip("\n").split("\n")
+    infill_lines = stripped_line_split(infill)
 
     return "\n".join(infill_lines[:max_num_lines])
     # if infill.startswith("\n"):
@@ -115,8 +115,6 @@ def stripped_line_split(text):
 def truncate_overlap(infill, suffix, num_consecutive_lines=4):
     infill_lines = stripped_line_split(infill)
     suffix_lines = stripped_line_split(suffix)
-
-    num_suffix_lines = len(suffix_lines)
 
     suffix_lines = suffix_lines[:num_consecutive_lines]
     if suffix_lines:
