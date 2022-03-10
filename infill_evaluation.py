@@ -39,70 +39,100 @@ def run_systematic_infill(args, model: Model, eval_type="one_line", result_base_
         response_pkl_fname = f"he_{eval_type}_responses.pkl"
     result_json = open(result_json_fname, "w")
 
-    problem_iterator = generate_he_infill_problems(args, eval_type)
+    problems = read_problems()
+    problem_iterator = list(generate_he_infill_problems(args, eval_type))
 
     responses = {}
 
-    for i, (task_id, task_id_problems) in enumerate(tqdm.tqdm(problem_iterator, ncols=120, total=164)): 
-        
-        infill_results = []
-        for problem in task_id_problems:
-            key = (task_id, problem["num_before"], problem["num_after"])
+    functional_results = []
 
-            prompt_parts = problem["prompt_parts"]
-            if len(prompt_parts) != 2:
-                raise NotImplementedError("multiple region infilling is not implemented")
-            else:
-                prefix, suffix = prompt_parts
+    with tqdm.tqdm(problem_iterator, ncols=120) as pbar:
+        for i, (task_id, task_id_problems) in enumerate(pbar):
+            if functional_results:
+                avg_pass = np.mean([x["passed"] for x in functional_results])
+                avg_exact = np.mean([x["exact_match"] for x in functional_results])
+                pbar.set_postfix({'pass': avg_pass, 'exact': avg_exact})
 
-            truncation_parameters = [
-                TruncationParameters.from_heuristics(args.truncation_heuristics, problem["missing_lines"], suffix)
-            ]
-            kwargs = dict(
-                verbose=False, n=args.num_candidates,
-                bidirectional_generation=args.bidirectional_generation, bidirectional_scoring=args.bidirectional_scoring,
-                truncation_parameters=truncation_parameters,
-                scoring=args.candidate_scoring,
-            )
-            if args.max_tokens is not None:
-                kwargs['max_tokens'] = args.max_tokens
-            elif eval_type == "one_line":
-                kwargs['max_tokens'] = 30
-            # if args.temperature == 0.0:
-            #     # kwargs.update(sampling=False)
-            # else:
-            kwargs.update(sampling=True, top_p=args.top_p, temperature=args.temperature)
-            sorted_choices, response = model.rank_infills(prompt_parts, **kwargs)
-
-            top_choice = sorted_choices[0]
-
-            results = problem.copy()
+            humaneval_problem = problems[task_id]
             
-            assert len(prompt_parts) == 2
-            results["text"] = top_choice["infills"][0]
-            results["complete"] = top_choice["complete"]
-            results["text_untruncated"] = top_choice["infills_untruncated"][0]
+            infill_results = []
+            for infilling_problem in task_id_problems:
+                key = (task_id, infilling_problem["num_before"], infilling_problem["num_after"])
 
-            responses[key] = response
+                prompt_parts = infilling_problem["prompt_parts"]
+                if len(prompt_parts) != 2:
+                    raise NotImplementedError("multiple region infilling is not implemented")
+                else:
+                    prefix, suffix = prompt_parts
 
-            infill_results.append(results)
+                truncation_parameters = [
+                    TruncationParameters.from_heuristics(args.truncation_heuristics, infilling_problem["missing_lines"], suffix)
+                ]
+                kwargs = dict(
+                    verbose=False, n=args.num_candidates,
+                    bidirectional_generation=args.bidirectional_generation, bidirectional_scoring=args.bidirectional_scoring,
+                    truncation_parameters=truncation_parameters,
+                    scoring=args.candidate_scoring,
+                )
+                if args.max_tokens is not None:
+                    kwargs['max_tokens'] = args.max_tokens
+                elif eval_type == 'one_line':
+                    kwargs['max_tokens'] = 30
+                # if args.temperature == 0.0:
+                #     # kwargs.update(sampling=False)
+                # else:
+                kwargs.update(sampling=True, top_p=args.top_p, temperature=args.temperature)
+                sorted_choices, response = model.rank_infills(prompt_parts, **kwargs)
 
-        with open(response_pkl_fname, "wb") as f:
-            pickle.dump(responses, f)
-        result = {
-                "task_id": task_id,
-                "canonical_solution": problem["canonical_solution"],
-                "infill_results": infill_results,
-                }
-        all_results.append(result)
-        result_json.write(json.dumps(result) + "\n")
-        if i % 10 == 0:
-            result_json.flush()
+                top_choice = sorted_choices[0]
+
+                infill_result = infilling_problem.copy()
+                
+                assert len(prompt_parts) == 2
+                infill_result["text"] = top_choice["infills"][0]
+                infill_result["complete"] = top_choice["complete"]
+                infill_result["text_untruncated"] = top_choice["infills_untruncated"][0]
+
+                responses[key] = response
+
+                infill_results.append(infill_result)
+
+                functional_results.append(eval_result(
+                    task_id, humaneval_problem, args.truncation_heuristics, infill_result,
+                ))
+
+            with open(response_pkl_fname, "wb") as f:
+                pickle.dump(responses, f)
+            result = {
+                    "task_id": task_id,
+                    "canonical_solution": humaneval_problem["canonical_solution"],
+                    "infill_results": infill_results,
+                    }
+            all_results.append(result)
+            result_json.write(json.dumps(result) + "\n")
+            if i % 10 == 0:
+                result_json.flush()
 
     with open(result_pkl_fname, "wb") as f:
         pickle.dump(all_results, f)
 
     result_json.close()
+
+def eval_result(task_id, problem, truncation_heuristics, infill_result):
+    prefix, suffix = infill_result["prompt_parts"]
+    truncation_parameters = TruncationParameters.from_heuristics(truncation_heuristics, infill_result["missing_lines"], suffix)
+    infill_truncated = truncation_parameters.truncate(infill_result["text_untruncated"])
+    # TODO: this strips initial whitespace. could check whether indent is correct?
+    is_exact_match = infill_truncated.rstrip() == infill_result["missing_lines"].rstrip()
+    complete = "\n".join([prefix, infill_truncated, suffix]).lstrip(problem["prompt"])
+    res = check_correctness(problem=problem, completion=complete, timeout=3.0)
+    return {
+        "task_id": task_id,
+        "num_before": infill_result["num_before"],
+        "num_after": infill_result["num_after"],
+        "passed": res["passed"],
+        "exact_match": is_exact_match, 
+    }
 
 def evaluate_systematic(filename: str, truncation_heuristics: List[str] = ["num_lines"]):
     """Reads infilled completions from a file, postprocesses them (truncates them to one line or multi-line w/ heuristics),
@@ -113,7 +143,6 @@ def evaluate_systematic(filename: str, truncation_heuristics: List[str] = ["num_
     problems = read_problems()
 
     functional_results = []
-    samples_to_eval = []
     with tqdm.tqdm(outputs, ncols=120) as p:
         for out in p:
             if functional_results:
@@ -121,30 +150,13 @@ def evaluate_systematic(filename: str, truncation_heuristics: List[str] = ["num_
                 avg_exact = np.mean([x["exact_match"] for x in functional_results])
                 p.set_postfix({'pass': avg_pass, 'exact': avg_exact})
 
-            for infill_res in out["infill_results"]:
-                prefix, suffix = infill_res["prompt_parts"]
-
-                truncation_parameters = TruncationParameters.from_heuristics(truncation_heuristics, infill_res["missing_lines"], suffix)
-
-                infill_truncated = truncation_parameters.truncate(infill_res["text_untruncated"])
-
-                # TODO: this strips initial whitespace. could check whether indent is correct?
-                is_exact_match = infill_truncated.rstrip() == infill_res["missing_lines"].rstrip()
-
-                complete = "\n".join([prefix, infill_truncated, suffix])
-
-                res = check_correctness(
-                    problem=problems[out["task_id"]],
-                    completion=complete,
-                    timeout=3.0)
-                functional_results.append({
-                    "task_id": out["task_id"],
-                    "num_before": infill_res["num_before"],
-                    "num_after": infill_res["num_after"],
-                    "passed": res["passed"],
-                    "exact_match": is_exact_match, 
-                    })
+            for infill_result in out["infill_results"]:
                 #print(f"{out['task_id']} | pass {res['passed']} | exact {is_exact_match}")
+                task_id = out["task_id"]
+                humaneval_problem = problems[task_id]
+                functional_results.append(eval_result(
+                    task_id, humaneval_problem, truncation_heuristics, infill_result,
+                ))
 
     avg_pass = np.mean([x["passed"] for x in functional_results])
     avg_exact = np.mean([x["exact_match"] for x in functional_results])
@@ -153,8 +165,8 @@ def evaluate_systematic(filename: str, truncation_heuristics: List[str] = ["num_
     print("average exact:", avg_exact)
 
     ext_stripped = os.path.splitext(filename)[0]
-    # with open(f"{ext_stripped}__functional_eval.json", "w") as f:
-    #     json.dump(functional_results, f)
+    with open(f"{ext_stripped}__functional_eval.json", "w") as f:
+        json.dump(functional_results, f)
 
 def make_parser():
     parser = argparse.ArgumentParser()

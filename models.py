@@ -20,7 +20,7 @@ CODEX_MAX_RETRIES = 30
 
 _TruncationParameters = namedtuple("_TruncationParameters", ["max_num_lines", "suffix"])
 class TruncationParameters(_TruncationParameters):
-    SUFFIX_NUM_CONSECUTIVE_LINES = 4
+    SUFFIX_NUM_CONSECUTIVE_LINES = 2
 
     HEURISTICS = ["num_lines", "suffix"]
 
@@ -44,7 +44,7 @@ class TruncationParameters(_TruncationParameters):
         """
         infill_truncated = infill
         if self.suffix is not None:
-            infill_truncated = truncate_overlap(infill, self.suffix, num_consecutive_lines=self.SUFFIX_NUM_CONSECUTIVE_LINES)
+            infill_truncated = truncate_overlap(infill, self.suffix, minimum_num_suffix_lines=self.SUFFIX_NUM_CONSECUTIVE_LINES)
         if self.max_num_lines is not None:
             infill_truncated = truncate_num_lines(infill_truncated, max_num_lines=self.max_num_lines)
         return infill_truncated
@@ -171,9 +171,16 @@ class Model:
             choices.append(d)
 
         if bidirectional_scoring:
-            raise NotImplementedError()
-        
-        sorted_choices = self._rank_helper(choices, scoring)
+            print("bidirectional_scoring")
+            completes = [choice['complete'] for choice in choices]
+            scores = self.score_text(completes, scoring=scoring)
+            assert len(scores) == len(choices)
+            for choice, score in zip(choices, scores):
+                choice['complete_score'] = score
+                choice['complete_score_method'] = scoring
+            sorted_choices = list(sorted(choices, key=lambda d: d['complete_score'], reverse=True))
+        else:
+            sorted_choices = self._rank_helper(choices, scoring)
 
         return sorted_choices, response
 
@@ -522,9 +529,11 @@ class CausalMasking(FairseqModel):
 
         self.EOSS_ID = tokenizer.token_to_id(self.EOSS) + self.TOKENIZER_OFFSET
 
-    def _encode(self, text):
-        return torch.tensor(self.tokenizer.encode(text).ids + [self.eos_index - self.TOKENIZER_OFFSET]) + self.TOKENIZER_OFFSET
-        #return torch.tensor(self.tokenizer.encode(text).ids) + self.TOKENIZER_OFFSET
+    def _encode(self, text, include_eos=True):
+        if include_eos:
+            return torch.tensor(self.tokenizer.encode(text).ids + [self.eos_index - self.TOKENIZER_OFFSET]) + self.TOKENIZER_OFFSET
+        else:
+            return torch.tensor(self.tokenizer.encode(text).ids) + self.TOKENIZER_OFFSET
 
     def _decode(self, tokens):
         token_ids = torch.tensor(tokens)
@@ -555,7 +564,7 @@ class CausalMasking(FairseqModel):
 
         # encode parts separated by sentinel
         for sentinel_ix, part in enumerate(parts):
-            part_tokens = self._encode(part)
+            part_tokens = self._encode(part, include_eos=False)
             ids.extend(part_tokens.tolist())
             if sentinel_ix < len(parts) - 1:
                 ids.append(self.sentinel_id(sentinel_ix))
@@ -567,11 +576,10 @@ class CausalMasking(FairseqModel):
         infill_scores = []
         infill_tokens = []
 
-        model.cfg.generation['max_len_b'] = max_tokens
-
         # autoregressively fill in
         for sentinel_ix, part in enumerate(parts[:-1]):
             ids.append(self.sentinel_id(sentinel_ix))
+            model.cfg.generation['max_len_b'] = max_tokens + len(ids)
             if verbose:
                 print(part, end="")
                 print(f"<sentinel:{sentinel_ix}>", end="")

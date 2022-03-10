@@ -112,16 +112,13 @@ def truncate_num_lines(infill: str, max_num_lines: int = 1) -> str:
 def stripped_line_split(text):
     return text.strip("\n").split("\n")
 
-def truncate_overlap(infill, suffix, num_consecutive_lines=4):
-    infill_lines = stripped_line_split(infill)
-    suffix_lines = stripped_line_split(suffix)
-
-    suffix_lines = suffix_lines[:num_consecutive_lines]
-    if suffix_lines:
-        for i in range(len(infill_lines)):
-            if infill_lines[i:i+len(suffix_lines)] == suffix_lines:
-                #print(" ||| ".join(suffix_lines))
-                return "\n".join(infill_lines[:i])
+def truncate_overlap(infill, suffix, minimum_num_characters=None, minimum_num_suffix_lines=1):
+    if minimum_num_characters is None:
+        non_empty_suffix_lines = [l.strip() for l in suffix.strip("\n") if l.strip()]
+        minimum_num_characters = sum(len(l) for l in non_empty_suffix_lines[:minimum_num_suffix_lines])
+    for i in range(len(infill), minimum_num_characters, -1):
+        if infill[-i:] == suffix[:i]:
+            return infill[:-i]
     return infill
 
 def find_nth(haystack, needle, n):
