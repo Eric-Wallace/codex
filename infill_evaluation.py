@@ -30,16 +30,18 @@ def run_systematic_infill(args, model: Model, eval_type="one_line", result_base_
     if result_base_path is not None:
         result_json_fname = f"{result_base_path}.json"
         result_pkl_fname = f"{result_base_path}.pkl"
+        response_pkl_fname = f"{result_base_path}_responses.pkl"
     else:
         result_json_fname = f"he_{eval_type}_systematic.json"
         result_pkl_fname = f"he_{eval_type}_systematic.pkl"
+        response_pkl_fname = f"he_{eval_type}_responses.pkl"
     result_json = open(result_json_fname, "w")
 
     problem_iterator = generate_he_infill_problems(args, eval_type)
 
     responses = {}
 
-    for i, (task_id, task_id_problems) in enumerate(tqdm.tqdm(problem_iterator, ncols=120)): 
+    for i, (task_id, task_id_problems) in enumerate(tqdm.tqdm(problem_iterator, ncols=120, total=164)): 
         
         infill_results = []
         for problem in task_id_problems:
@@ -79,6 +81,8 @@ def run_systematic_infill(args, model: Model, eval_type="one_line", result_base_
 
             infill_results.append(results)
 
+        with open(response_pkl_fname, "wb") as f:
+            pickle.dump(responses, f)
         result = {
                 "task_id": task_id,
                 "canonical_solution": problem["canonical_solution"],

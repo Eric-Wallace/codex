@@ -5,9 +5,11 @@ import tqdm
 import pickle
 import pprint
 import argparse
+import numpy as np
 from collections import defaultdict
 
 from human_eval.data import write_jsonl, read_problems
+from human_eval.evaluation import evaluate_functional_correctness
 
 from utils import build_systematic_infill_prompt
 
@@ -71,9 +73,36 @@ def generate_he_infill_problems(args, eval_type="one_line"):
             })
         yield task_id, task_id_problems
 
+def remove_test_cases(prompt):
+    if 'double_the_difference([' in prompt:
+        prompt = prompt.split("double_the_difference([")[0].strip() + '\n    """'
+    if '[input/output] samples' in prompt:
+        prompt = prompt.split("[input/output] samples")[0].strip() + '\n    """'
+    if 'compare_one' in prompt:
+        prompt = prompt.split("compare_one")[0].strip() + '\n    """'
+    if 'fix_spaces"' in prompt:
+        prompt = prompt.split('fix_spaces"')[0].strip() + '\n    """'
+    if 'It must be implemented like this:' in prompt:
+        prompt = prompt.split("It must be implemented like this:")[0].strip() + '\n    """'
+    if 'next_smallest([' in prompt:
+        prompt = prompt.split("next_smallest([")[0].strip() + '\n    """'
+    elif "is_nested('[[]]')" in prompt:
+        prompt = prompt.split("is_nested('[[]]')")[0].strip() + '\n    """'
+    elif 'for example' in prompt:
+        prompt = prompt.split('for example')[0].strip() + '\n    """'
+    elif 'For Example' in prompt:
+        prompt = prompt.split('For Example')[0].strip() + '\n    """'
+    elif 'Examples' in prompt:
+        prompt = prompt.split('Examples')[0].strip() + '\n    """'
+    elif 'Example' in prompt:
+        prompt = prompt.split('Example')[0].strip() + '\n    """'
+    elif 'For example' in prompt:
+        prompt = prompt.split('For example')[0].strip() + '\n    """'
+    elif '>>>' in prompt:
+        prompt = prompt.split('>>>')[0].strip() + '\n    """'
+    return prompt
 
-if __name__ == "__main__":
-    print(' '.join(sys.argv))
+def make_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name", type=str)
     parser.add_argument("--tokenizer_name", type=str, choices=["gpt2", "gpt2_pretokenization_newlines_only"])
@@ -85,14 +114,22 @@ if __name__ == "__main__":
     parser.add_argument("--cached_responses", action='store_true')
     parser.add_argument("--multiple_cached_responses_filenames", nargs='*')
     parser.add_argument("--remove_test_cases", default=False, action='store_true')
+    parser.add_argument("--verbose", action="store_true")
 
     parser.add_argument("--temperature", type=float, default=0.6)
     parser.add_argument("--top_p", type=float, default=0.95)
+    parser.add_argument("--unnormalized", action="store_true")
 
     parser.add_argument("--batch_size", type=int)
 
     parser.add_argument("--prompt_prefix")
     parser.add_argument("--candidate_scoring", choices=["mean", "sum", "random"], default="mean")
+    return parser
+
+
+if __name__ == "__main__":
+    print(' '.join(sys.argv))
+    parser = make_parser()
 
     args = parser.parse_args()
     pprint.pprint(vars(args))
@@ -115,57 +152,53 @@ if __name__ == "__main__":
             responses = unpickle(args.response_filename)
     else:
         responses = {}
-    for task_id, problem in tqdm.tqdm(problems, ncols=80):
-        prompt = problem['prompt']
-        if args.remove_test_cases:
-            if 'double_the_difference([' in prompt:
-                prompt = prompt.split("double_the_difference([")[0].strip() + '\n    """'
-            if '[input/output] samples' in prompt:
-                prompt = prompt.split("[input/output] samples")[0].strip() + '\n    """'
-            if 'compare_one' in prompt:
-                prompt = prompt.split("compare_one")[0].strip() + '\n    """'
-            if 'fix_spaces"' in prompt:
-                prompt = prompt.split('fix_spaces"')[0].strip() + '\n    """'
-            if 'It must be implemented like this:' in prompt:
-                prompt = prompt.split("It must be implemented like this:")[0].strip() + '\n    """'
-            if 'next_smallest([' in prompt:
-                prompt = prompt.split("next_smallest([")[0].strip() + '\n    """'
-            elif "is_nested('[[]]')" in prompt:
-                prompt = prompt.split("is_nested('[[]]')")[0].strip() + '\n    """'
-            elif 'for example' in prompt:
-                prompt = prompt.split('for example')[0].strip() + '\n    """'
-            elif 'For Example' in prompt:
-                prompt = prompt.split('For Example')[0].strip() + '\n    """'
-            elif 'Examples' in prompt:
-                prompt = prompt.split('Examples')[0].strip() + '\n    """'
-            elif 'Example' in prompt:
-                prompt = prompt.split('Example')[0].strip() + '\n    """'
-            elif 'For example' in prompt:
-                prompt = prompt.split('For example')[0].strip() + '\n    """'
-            elif '>>>' in prompt:
-                prompt = prompt.split('>>>')[0].strip() + '\n    """'
-        completions, response = model.rank_completions(
-            prompt, HUMAN_EVAL_STOP_WORDS,
-            max_tokens=450,
-            n=args.num_candidates_generated,
-            # if we've cached responses, use the cached
-            cached_response=responses.get(task_id) if args.cached_responses else None,
-            scoring=args.candidate_scoring,
-            temperature=args.temperature,
-            top_p=args.top_p,
-        )
-        responses[task_id] = response
-        for score, candidate in completions[:args.num_candidates_evaluated]:
-            samples_to_evaluate.append(dict(
-                task_id=task_id,
-                completion=candidate
-            ))
+
+    all_results = []
+    all_extras = []
+
+    with tqdm.tqdm(problems, ncols=120) as pbar:
+        for task_id, problem in pbar:
+            prompt = problem['prompt']
+            if args.remove_test_cases:
+                prompt = remove_test_cases(prompt)
+            # candidates: [{'text': text, 'logprobs': {...}}, ...]
+            candidates, response = model.rank_completions(
+                prompt, HUMAN_EVAL_STOP_WORDS,
+                max_tokens=450,
+                n=args.num_candidates_generated,
+                # if we've cached responses, use the cached
+                cached_response=responses.get(task_id) if args.cached_responses else None,
+                scoring=args.candidate_scoring,
+                temperature=args.temperature,
+                top_p=args.top_p,
+            )
+            responses[task_id] = response
+            this_samples_to_evaluate = []
+            for candidate in candidates[:args.num_candidates_evaluated]:
+                if args.verbose:
+                    print("prompt:")
+                    print(prompt)
+                    print("candidate:")
+                    print(candidate["text"])
+                    print("canonical solution:")
+                    print(problem["canonical_solution"])
+                    print()
+                this_samples_to_evaluate.append(dict(
+                    task_id=task_id,
+                    completion=candidate["text"]
+                ))
+            samples_to_evaluate.extend(this_samples_to_evaluate)
+
+            this_results, this_extra = evaluate_functional_correctness(sample_file=None, samples=this_samples_to_evaluate, suppress=True, strict=False)
+            all_results.append(this_results)
+            all_extras.append(this_extra)
+            average_pass_at_1 = np.mean([res['pass@1'] for res in all_results])
+            pbar.set_postfix({'pass@1': average_pass_at_1})
 
     write_jsonl(args.output_filename, samples_to_evaluate)
     with open(args.response_filename, 'wb') as f:
         pickle.dump(responses, f)
 
-    from human_eval.evaluation import evaluate_functional_correctness
     import pprint
     results, extra = evaluate_functional_correctness(sample_file=None, samples=samples_to_evaluate)
     pprint.pprint(results)

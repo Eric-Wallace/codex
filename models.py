@@ -5,6 +5,7 @@ import numpy as np
 from typing import List
 import random
 import sys
+import argparse
 
 from collections import namedtuple
 try:
@@ -281,7 +282,8 @@ class HFModel(Model):
         return return_json
 
 class FairseqModel(Model):
-    def __init__(self, model_path: str, tokenizer_name=None, gpt2_encoder_json=None, gpt2_vocab_bpe=None, prompt_prefix=None, batch_size=None):
+    def __init__(self, args: argparse.Namespace, model_path: str, tokenizer_name=None, gpt2_encoder_json=None, gpt2_vocab_bpe=None, prompt_prefix=None, batch_size=None, model=None):
+        self.args = args
         if tokenizer_name is None:
             bpe = "gpt2_pretokenization_newlines_only"
         else:
@@ -300,11 +302,21 @@ class FairseqModel(Model):
         self.gpt2_encoder_json = gpt2_encoder_json
         self.gpt2_vocab_bpe = gpt2_vocab_bpe
 
+        print(f"model_root_dir: {model_root_dir}")
+        print(f"model_basename: {model_basename}")
         from fairseq.models.transformer_lm import TransformerLanguageModel
-        self.lm_model = TransformerLanguageModel.from_pretrained(
-            model_root_dir, model_basename, bpe=bpe, gpt2_encoder_json=gpt2_encoder_json, gpt2_vocab_bpe=gpt2_vocab_bpe
-            ).half()
-        self.lm_model.eval().cuda() 
+        if model is None:
+            self.lm_model = TransformerLanguageModel.from_pretrained(
+                model_root_dir, model_basename, bpe=bpe, gpt2_encoder_json=gpt2_encoder_json, gpt2_vocab_bpe=gpt2_vocab_bpe
+                ).half()
+            self.lm_model.eval().cuda() 
+        else:
+            self.lm_model = model
+
+        # length normalization? 
+        self.unnormalized = args.unnormalized
+        self.lm_model.cfg.generation['unnormalized'] = args.unnormalized
+
         self.prompt_prefix = prompt_prefix
         self.eos_index = self.lm_model.task.dictionary.eos_index
 
@@ -356,7 +368,6 @@ class FairseqModel(Model):
         choices = []
         with torch.no_grad():
             lm_model.cfg.generation['max_len_b'] = max_tokens
-            lm_model.cfg.generation['unnormalized'] = True
 
             encoded_prompt = self._encode(prompt)
             prompt_len = len(encoded_prompt)
@@ -466,8 +477,8 @@ class CausalMasking(FairseqModel):
     def _extra_stop_words(self):
         return super()._extra_stop_words + self._special_tokens
 
-    def __init__(self, model_path: str, bpe="gpt2_pretokenization_newlines_only", gpt2_encoder_json=None, gpt2_vocab_bpe=None, prompt_prefix=None, batch_size=None):
-        super().__init__(model_path, bpe, gpt2_encoder_json, gpt2_vocab_bpe, prompt_prefix, batch_size=batch_size)
+    def __init__(self, args, model_path: str, bpe="gpt2_pretokenization_newlines_only", gpt2_encoder_json=None, gpt2_vocab_bpe=None, prompt_prefix=None, batch_size=None):
+        super().__init__(args, model_path, bpe, gpt2_encoder_json, gpt2_vocab_bpe, prompt_prefix, batch_size=batch_size)
         assert bpe in {"gpt2_pretokenization_newlines_only", "bpe"}
         from tokenizers import ByteLevelBPETokenizer
         self.tokenizer = tokenizer = ByteLevelBPETokenizer.from_file(
@@ -477,6 +488,8 @@ class CausalMasking(FairseqModel):
         )
         tokenizer.add_special_tokens(self._special_tokens)
 
+        self.EOSS_ID = tokenizer.token_to_id(self.EOSS) + self.TOKENIZER_OFFSET
+
     def _encode(self, text):
         return torch.tensor(self.tokenizer.encode(text).ids + [self.eos_index - self.TOKENIZER_OFFSET]) + self.TOKENIZER_OFFSET
         #return torch.tensor(self.tokenizer.encode(text).ids) + self.TOKENIZER_OFFSET
@@ -485,7 +498,7 @@ class CausalMasking(FairseqModel):
         token_ids = torch.tensor(tokens)
         return self.tokenizer.decode((token_ids - self.TOKENIZER_OFFSET).tolist(), skip_special_tokens=False)
 
-    def infill(self, parts: List[str], verbose=False, n=1, truncation_parameters: List[TruncationParameters]=None, **kwargs):
+    def infill(self, parts: List[str], verbose=False, n=1, truncation_parameters: List[TruncationParameters]=None, sampling=True, max_tokens=450, top_p=0.95, temperature=0.0):
         # Force the model to fill in code in between each string in parts
         # see code_to_docstring and docstring_to_code for example usages
         if truncation_parameters is None:
@@ -523,6 +536,8 @@ class CausalMasking(FairseqModel):
         infill_scores = []
         infill_tokens = []
 
+        model.cfg.generation['max_len_b'] = max_tokens
+
         # autoregressively fill in
         for sentinel_ix, part in enumerate(parts[:-1]):
             ids.append(self.sentinel_id(sentinel_ix))
@@ -530,7 +545,16 @@ class CausalMasking(FairseqModel):
                 print(part, end="")
                 print(f"<sentinel:{sentinel_ix}>", end="")
             with torch.no_grad():
-                outputs = model.generate([torch.tensor(ids)], **kwargs)
+                if temperature == 0:
+                    assert n==1
+                    outputs = model.generate(
+                        [torch.tensor(ids)], sampling=True, beam=1, sampling_topk=1, sampling_topp=top_p,
+                    )
+                else:
+                    # TODO: batch
+                    outputs = model.generate(
+                        [torch.tensor(ids)], sampling=True, beam=n, sampling_topp=top_p, temperature=temperature,
+                    )
                 completion = outputs[0][0]['tokens'].tolist()
                 scores = outputs[0][0]['positional_scores']
                 if completion[-1] == 2:
@@ -569,16 +593,16 @@ class CausalMasking(FairseqModel):
         #     print("-"*20)
         #     print(''.join((complete)))
 
-        decoded_tokens = [ [self._decode([t]) for t in completion] for completion in infill_tokens]
+        # decoded_tokens = [ [self._decode([t]) for t in completion] for completion in infill_tokens]
 
         choice = {
             'complete': complete,
             'infills_untruncated': infills,
             'ids': ids,
-            'raw': self._decode(ids),
+            # 'raw': self._decode(ids),
             'logprobs': {
                 'token_logprobs': infill_scores,
-                'tokens': decoded_tokens,
+                'tokens': None,
             },
         }
 
@@ -674,9 +698,9 @@ def make_model(args, model_name, tokenizer_name=None, prompt_prefix=None):
         return OpenAIModel(model_name, persistent=True)
     elif 'fairseq' or '/checkpoint' in model_name:
         if 'cm-' in model_name:
-            return CausalMasking(model_name, prompt_prefix=prompt_prefix, batch_size=args.batch_size)
+            return CausalMasking(args, model_name, prompt_prefix=prompt_prefix, batch_size=args.batch_size)
         elif 'lm-' in model_name:
-            return FairseqModel(model_name, prompt_prefix=prompt_prefix, batch_size=args.batch_size)
+            return FairseqModel(args, model_name, prompt_prefix=prompt_prefix, batch_size=args.batch_size)
         elif 'gpt-j' in model_name:
             if prompt_prefix is not None:
                 raise NotImplementedError()
