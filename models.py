@@ -424,7 +424,7 @@ class FairseqModel(Model):
                 if temperature == 0:
                     assert n==1
                     this_completions = lm_model.generate(
-                        [encoded_prompt], sampling=True, beam=1, sampling_topk=1,
+                        [encoded_prompt], sampling=False,
                     )
                 else:
                     this_completions = lm_model.generate(
@@ -583,12 +583,13 @@ class CausalMasking(FairseqModel):
                 print(part, end="")
                 print(f"<sentinel:{sentinel_ix}>", end="")
             with torch.no_grad():
-                print("completing: ")
-                print(self._decode(ids))
+                # print("completing: ")
+                # print(self._decode(ids))
                 if temperature == 0:
                     assert n==1
+                    # print("not sampling")
                     outputs = model.generate(
-                        [torch.tensor(ids)], sampling=True, beam=1, sampling_topk=1, sampling_topp=top_p,
+                        [torch.tensor(ids)], sampling=False,
                     )
                 else:
                     # TODO: batch
@@ -596,8 +597,6 @@ class CausalMasking(FairseqModel):
                         [torch.tensor(ids)], sampling=True, beam=n, sampling_topp=top_p, temperature=temperature,
                     )
                 completion = outputs[0][0]['tokens'].tolist()
-                print("completed:")
-                print(completion)
                 scores = outputs[0][0]['positional_scores']
                 if completion[-1] == 2:
                     completion = completion[:-1]
@@ -624,6 +623,9 @@ class CausalMasking(FairseqModel):
             infill_scores.append(scores)
 
             decoded = self._decode(completion[:-1])
+            # print("decoded:")
+            # print(decoded)
+            # print()
             complete.append(part)
             complete.append(decoded)
             infills.append(decoded)
@@ -636,9 +638,9 @@ class CausalMasking(FairseqModel):
         #     print(''.join((complete)))
 
         # decoded_tokens = [ [self._decode([t]) for t in completion] for completion in infill_tokens]
-        print("complete:")
-        print(complete)
-        print()
+        # print("complete:")
+        # print(complete)
+        # print()
 
         choice = {
             'complete': complete,
