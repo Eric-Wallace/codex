@@ -81,7 +81,7 @@ def run_systematic_infill(args, model: Model, eval_type="one_line", result_base_
                 # if args.temperature == 0.0:
                 #     # kwargs.update(sampling=False)
                 # else:
-                kwargs.update(sampling=True, top_p=args.top_p, temperature=args.temperature)
+                kwargs.update(sampling=True, top_p=args.top_p, temperature=args.temperature, beam=args.beam)
                 sorted_choices, response = model.rank_infills(prompt_parts, **kwargs)
 
                 top_choice = sorted_choices[0]
@@ -180,6 +180,7 @@ def make_parser():
 
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top_p", type=float, default=0.95)
+    parser.add_argument("--beam", type=int, default=1)
     parser.add_argument("--unnormalized", action="store_true")
     parser.add_argument("--max_tokens", type=int)
 

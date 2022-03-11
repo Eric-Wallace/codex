@@ -118,6 +118,7 @@ def make_parser():
 
     parser.add_argument("--temperature", type=float, default=0.6)
     parser.add_argument("--top_p", type=float, default=0.95)
+    parser.add_argument("--beam", type=int, default=1)
     parser.add_argument("--unnormalized", action="store_true")
 
     parser.add_argument("--batch_size", type=int)
@@ -171,6 +172,7 @@ if __name__ == "__main__":
                 scoring=args.candidate_scoring,
                 temperature=args.temperature,
                 top_p=args.top_p,
+                beam=args.beam,
             )
             responses[task_id] = response
             this_samples_to_evaluate = []

@@ -107,9 +107,9 @@ class Model:
                 raise NotImplementedError(f"scoring {scoring}")
         return list(sorted(choices, key=scoring_fn, reverse=True))
 
-    def rank_completions(self, prompt: str, stop_words: List[str], cached_response=None, scoring='mean', sampling=True, temperature=0.6, top_p=0.95, n=1, max_tokens=128):
+    def rank_completions(self, prompt: str, stop_words: List[str], cached_response=None, scoring='mean', sampling=True, temperature=0.6, top_p=0.95, n=1, max_tokens=128, beam=1):
         if cached_response is None:
-            response = self.complete(prompt, stop_words, sampling=sampling, temperature=temperature, top_p=top_p, n=n, max_tokens=max_tokens)
+            response = self.complete(prompt, stop_words, sampling=sampling, temperature=temperature, top_p=top_p, n=n, max_tokens=max_tokens, beam=beam)
         else:
             response = cached_response
         sorted_choices = self._rank_helper(response['choices'], scoring=scoring)
@@ -118,7 +118,7 @@ class Model:
     def rank_infills(self, parts: List[str], verbose=False, bidirectional_scoring=False, bidirectional_generation=False,
                     cached_response=None, scoring='mean',
                     truncation_parameters: List[TruncationParameters] = None,
-                    sampling=True, temperature=0.6, top_p=0.95, n=1, max_tokens=128):
+                    sampling=True, temperature=0.6, top_p=0.95, n=1, max_tokens=128, beam=1):
         if truncation_parameters is None:
             truncation_parameters = [TruncationParameters(None, None) for _ in parts[:-1]]
         assert len(truncation_parameters) == len(parts) - 1
@@ -133,9 +133,9 @@ class Model:
 
         if cached_response is None:
             if bidirectional_generation:
-                response = self.infill([prefix, suffix], truncation_parameters=[trunc_params], verbose=verbose, sampling=sampling, temperature=temperature, top_p=top_p, n=n, max_tokens=max_tokens)
+                response = self.infill([prefix, suffix], truncation_parameters=[trunc_params], verbose=verbose, sampling=sampling, temperature=temperature, top_p=top_p, n=n, max_tokens=max_tokens, beam=beam)
             else:
-                response = self.complete(prefix, stop_words=[], sampling=sampling, temperature=temperature, top_p=top_p, n=n, max_tokens=max_tokens)
+                response = self.complete(prefix, stop_words=[], sampling=sampling, temperature=temperature, top_p=top_p, n=n, max_tokens=max_tokens, beam=beam)
         else:
             response = cached_response
 
@@ -202,11 +202,14 @@ class HFModel(Model):
     def encode_stop_words(self, stop_words: List[str]):
         return [self.lm_tokenizer.encode(string) for string in stop_words]
 
-    def complete(self, prompt, stop_words: List[str], sampling=True, max_tokens=128, top_p=0.95, n=1, num_log_probs=1, temperature=0.6):
+    def complete(self, prompt, stop_words: List[str], sampling=True, max_tokens=128, top_p=0.95, n=1, num_log_probs=1, temperature=0.6, beam=1):
         ''' This function runs GPT-2 locally using HF transformers but places the outputs into an json that looks just like the one
         provided by the OpenAI API. '''
 
         batch_size = n if self.batch_size is None else self.batch_size
+
+        if beam != 1:
+            raise NotImplementedError()
 
         if not sampling:
             raise NotImplementedError()
@@ -383,7 +386,7 @@ class FairseqModel(Model):
                 all_scores.append(score.item())
         return all_scores
 
-    def complete(self, prompt: str, stop_words: List[str], sampling=True, max_tokens=128, top_p=0.95, n=1, num_log_probs=1, temperature=0.6):
+    def complete(self, prompt: str, stop_words: List[str], sampling=True, max_tokens=128, top_p=0.95, n=1, num_log_probs=1, temperature=0.6, beam=1):
         ''' This function runs fairseq LM locally but places the outputs into an json that looks just like the one
         provided by the OpenAI API. '''
 
@@ -418,15 +421,15 @@ class FairseqModel(Model):
             completions = []
             while len(completions) < n:
                 this_n = min(batch_size, n - len(completions))
-                # greedily generate l tokens
                 # total_sequences is now the input + possible generated output
-                # beam is actually just the num of candidates to sample, when sampling=True
                 if temperature == 0:
                     assert n==1
                     this_completions = lm_model.generate(
-                        [encoded_prompt], sampling=False,
+                        [encoded_prompt], sampling=False, beam=beam,
                     )
                 else:
+                    assert beam == 1, "cannot have a non-zero temperature and beam != 1"
+                    # the beam argument to generate actually just specifies the num of candidates to sample, when sampling=True
                     this_completions = lm_model.generate(
                         [encoded_prompt], sampling=True, beam=this_n, sampling_topp=top_p, temperature=temperature,
                     )
@@ -538,7 +541,7 @@ class CausalMasking(FairseqModel):
         token_ids = torch.tensor(tokens)
         return self.tokenizer.decode((token_ids - self.TOKENIZER_OFFSET).tolist(), skip_special_tokens=False)
 
-    def infill(self, parts: List[str], verbose=False, n=1, truncation_parameters: List[TruncationParameters]=None, sampling=True, max_tokens=128, top_p=0.95, temperature=0.0):
+    def infill(self, parts: List[str], verbose=False, n=1, truncation_parameters: List[TruncationParameters]=None, sampling=True, max_tokens=128, top_p=0.95, temperature=0.0, beam=1):
         # Force the model to fill in code in between each string in parts
         # see code_to_docstring and docstring_to_code for example usages
         if truncation_parameters is None:
@@ -589,10 +592,12 @@ class CausalMasking(FairseqModel):
                     assert n==1
                     # print("not sampling")
                     outputs = model.generate(
-                        [torch.tensor(ids)], sampling=False,
+                        [torch.tensor(ids)], sampling=False, beam=beam,
                     )
                 else:
                     # TODO: batch
+                    assert beam == 1, "cannot have a non-zero temperature and beam != 1"
+                    # the beam argument to generate actually just specifies the num of candidates to sample, when sampling=True
                     outputs = model.generate(
                         [torch.tensor(ids)], sampling=True, beam=n, sampling_topp=top_p, temperature=temperature,
                     )
@@ -661,6 +666,7 @@ class CausalMasking(FairseqModel):
 
 class CodeGPT2(Model):
     def __init__(self, model_path='/private/home/fhs/models/pretrained/codemodels/code-gpt2/pytorch_model.bin', prompt_prefix=None):
+        raise NotImplementedError("TODO: update complete to match new method sigs")
         if prompt_prefix is not None:
             raise NotImplementedError("--prompt_prefix for CodeGPT2")
         from transformers import GPT2LMHeadModel, AutoTokenizer
@@ -723,10 +729,12 @@ class OpenAIModel(Model):
             all_scores.append(score)
         return all_scores
 
-    def complete(self, prompt, stop_words, max_tokens=450, top_p=0.95, temperature=0.6, sampling=True, **kwargs):
+    def complete(self, prompt, stop_words, max_tokens=450, top_p=0.95, temperature=0.6, sampling=True, beam=1, **kwargs):
         if stop_words == []:
             stop_words = None
         if not sampling:
+            raise NotImplementedError()
+        if beam != 1:
             raise NotImplementedError()
         import openai
         from secret import API_KEY
