@@ -1,0 +1,7 @@
+__pycache__/
+.vscode/
+
+secret.py
+slurm-*.out
+slurm-logs/
+notebooks/.ipynb_checkpoints/
