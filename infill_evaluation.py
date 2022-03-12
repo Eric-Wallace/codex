@@ -1,6 +1,6 @@
 from human_eval.data import read_problems
 from human_eval.execution import check_correctness
-from utils import build_systematic_infill_prompt, truncate_num_lines, read_file, truncate_overlap, stripped_line_split
+from utils import build_systematic_infill_prompt, dump_version_info, truncate_num_lines, read_file, truncate_overlap, stripped_line_split, dump_git_status
 import json
 import pickle
 import numpy as np
@@ -13,7 +13,7 @@ import argparse
 
 from typing import List
 
-from models import TruncationParameters, make_model, Model
+from models import TruncationParameters, add_infilling_args, add_model_args, make_model, Model
 
 from he import HUMAN_EVAL_STOP_WORDS, generate_he_infill_problems
 
@@ -170,28 +170,15 @@ def evaluate_systematic(filename: str, truncation_heuristics: List[str] = ["num_
 
 def make_parser():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_path")
-    parser.add_argument("--tokenizer_name", type=str, choices=["gpt2", "gpt2_pretokenization_newlines_only"])
-    parser.add_argument("--prompt_prefix", type=str)
-    parser.add_argument("--batch_size", type=int, default=3)
+    add_model_args(parser)
+    add_infilling_args(parser)
+
     parser.add_argument("--result_base_path")
     parser.add_argument("--eval_type", choices=["one_line", "all_lines"], default="one_line")
     parser.add_argument("--evaluate_only", action="store_true")
 
-    parser.add_argument("--temperature", type=float, default=0.0)
-    parser.add_argument("--top_p", type=float, default=0.95)
-    parser.add_argument("--beam", type=int, default=1)
-    parser.add_argument("--unnormalized", action="store_true")
-    parser.add_argument("--max_tokens", type=int)
+    parser.add_argument("--git_status", action="store_true")
 
-    parser.add_argument("--truncation_heuristics", nargs='*', choices=TruncationParameters.HEURISTICS, default=["num_lines"])
-
-    parser.add_argument("--bidirectional_generation", action="store_true")
-    parser.add_argument("--bidirectional_scoring", action="store_true")
-
-    # for LTR models
-    parser.add_argument("--num_candidates", type=int, default=10)
-    parser.add_argument("--candidate_scoring", choices=["mean", "sum", "random"], default="mean")
     return parser
 
 
@@ -200,12 +187,11 @@ if __name__ == "__main__":
     parser = make_parser()
     args = parser.parse_args()
     pprint.pprint(vars(args))
+    if args.git_status:
+        dump_git_status()
+        dump_version_info()
 
     if not args.evaluate_only:
-        if args.model_path is None:
-            # assert args.cached_responses, "must pass --model_path=<model> or --cached_responses"
-            model = Model()
-        else:
-            model = make_model(args, args.model_path, args.tokenizer_name, prompt_prefix=args.prompt_prefix)
+        model = make_model(args)
         run_systematic_infill(args, model, eval_type=args.eval_type, result_base_path=args.result_base_path)
     evaluate_systematic(f"{args.result_base_path}.pkl", truncation_heuristics=args.truncation_heuristics)

@@ -5,3 +5,5 @@ secret.py
 slurm-*.out
 slurm-logs/
 notebooks/.ipynb_checkpoints/
+
+expts/

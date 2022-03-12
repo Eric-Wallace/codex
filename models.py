@@ -49,6 +49,23 @@ class TruncationParameters(_TruncationParameters):
             infill_truncated = truncate_num_lines(infill_truncated, max_num_lines=self.max_num_lines)
         return infill_truncated
 
+def add_model_args(parser):
+    parser.add_argument("--model_name", type=str, help="either the name of a codex engine, or a path to a fairseq or HF transformers serialized model. type will be inferred based on the name")
+    parser.add_argument("--tokenizer_name", type=str, choices=["gpt2", "gpt2_pretokenization_newlines_only"])
+    parser.add_argument("--temperature", type=float, default=0.6, help="pass 0.0 to do greedy or beam decoding")
+    parser.add_argument("--top_p", type=float, default=0.95, help="nucleus top-p")
+    parser.add_argument("--beam", type=int, default=1, help="beam size; only used if --temperature==0.0")
+    parser.add_argument("--batch_size", type=int)
+    parser.add_argument("--prompt_prefix")
+    parser.add_argument("--candidate_scoring", choices=["mean", "sum", "random"], default="mean")
+    parser.add_argument("--max_tokens", type=int, default=128)
+
+def add_infilling_args(parser):
+    parser.add_argument("--truncation_heuristics", nargs='*', choices=TruncationParameters.HEURISTICS, default=["num_lines"])
+    parser.add_argument("--bidirectional_generation", action="store_true", help="for infilling, generate candidates using both left and right contexts")
+    parser.add_argument("--bidirectional_scoring", action="store_true", help="for infilling, rerank generated candidates using the left and right contexts")
+    parser.add_argument("--num_candidates", type=int, default=10, help="number of candidates to use in infilling reranking")
+
 class Model:
     def encode_stop_words(self, stop_words: List[str]):
         raise NotImplementedError()
@@ -308,6 +325,7 @@ class FairseqModel(Model):
         assert bpe in ["gpt2_pretokenization_newlines_only", "gpt2"], f"invalid bpe type {bpe}"
         if not model_path.endswith(".pt"):
             print(f"warning: model_path {model_path} does not end in *.pt")
+        assert os.path.exists(model_path), f"model_path {model_path} should be a file"
         model_root_dir = os.path.dirname(model_path)
         model_basename = os.path.basename(model_path)
         if gpt2_encoder_json is None:
@@ -330,8 +348,9 @@ class FairseqModel(Model):
             self.lm_model = model
 
         # length normalization? 
-        self.unnormalized = args.unnormalized
-        self.lm_model.cfg.generation['unnormalized'] = args.unnormalized
+        #self.unnormalized = args.unnormalized
+        self.unnormalized = True
+        self.lm_model.cfg.generation['unnormalized'] = True
 
         self.prompt_prefix = prompt_prefix
         self.eos_index = self.lm_model.task.dictionary.eos_index
@@ -365,7 +384,8 @@ class FairseqModel(Model):
         tokens = [self._encode(text) for text in text_batch]
         return self.score_tokens(tokens, scoring)
 
-    def score_tokens(self, tokens_batch: List[torch.tensor], scoring='sum'):
+    def score_tokens(self, tokens_batch, scoring='sum'):
+        # tokens_batch: List[torch.tensor]
         # not sure if passing temperature here does anything, but it shouldn't hurt
         all_scores = []
 
@@ -765,10 +785,15 @@ class OpenAIModel(Model):
                 time.sleep(CODEX_RETRY_DELAY_SECONDS)
         return response
 
-def make_model(args, model_name, tokenizer_name=None, prompt_prefix=None, cached_model=None):
+def make_model(args, cached_model=None):
+    model_name = args.model_name
+    if model_name is None:
+        return Model()
+    tokenizer_name = args.tokenizer_name
+    prompt_prefix = args.prompt_prefix
     if 'davinci' in model_name or 'cushman' in model_name:
         if prompt_prefix is not None:
-            raise NotImplementedError()
+            raise NotImplementedError("prompt prefix for codex models")
         return OpenAIModel(model_name, persistent=True)
     elif 'fairseq' or '/checkpoint' in model_name:
         if 'cm-' in model_name:

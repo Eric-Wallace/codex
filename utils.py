@@ -1,6 +1,8 @@
 from typing import List, Tuple
 import pickle
 import json
+import sys
+import subprocess
 
 TRIPLE_QUOTE = '"""'
 SINGLE_TRIPLE_QUOTE = "'''"
@@ -133,7 +135,28 @@ def read_file(filename):
         with open(filename) as f:
             return [json.loads(line) for line in f]
     elif filename.endswith(".pkl"):
-        with open(filename, 'rb') as f:
-            return pickle.load(f)
+        return unpickle(filename)
     else:
         raise NotImplementedError()
+
+def all_equal(iterable):
+    iterable = list(iterable)
+    return all(iterable[0] == x for x in iterable)
+
+def unpickle(filename):
+    with open(filename, 'rb') as f:
+        return pickle.load(f)
+
+def dump_git_status(out_file=sys.stdout, exclude_file_patterns=['*.ipynb', '*.th', '*.sh', '*.txt', '*.json', '*.out']):
+    subprocess.call('git rev-parse HEAD', shell=True, stdout=out_file)
+    exclude_string = ' '.join("':(exclude){}'".format(f) for f in exclude_file_patterns)
+    subprocess.call('git --no-pager diff -- . {}'.format(exclude_string), shell=True, stdout=out_file)
+
+def dump_version_info(out_file=sys.stdout):
+    try:
+        print("fairseq version:", file=out_file)
+        import fairseq
+        print(fairseq.__version__, file=out_file)
+        print(fairseq.__file__, file=out_file)
+    except:
+        print("fairseq not found", file=out_file)

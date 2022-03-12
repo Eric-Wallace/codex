@@ -12,8 +12,11 @@ import threading
 import functools
 from tqdm import tqdm
 from functools import partial
+import sys
+import pprint
 
-from models import make_model
+from models import make_model, add_model_args
+from utils import dump_git_status, dump_version_info
 
 # stop words differ from human_eval because we don't have the function signature
 # TODO: consider standardizing these interfaces
@@ -136,7 +139,7 @@ def evaluate_code_generic(args, model):
             if num_candidates_evaluated != num_candidates_generated:
                 raise NotImplementedError()
             response = model.complete(
-                prompt, MBPP_STOP_WORDS, n=num_candidates_generated, max_tokens=2048 if has_k_shot else 450,
+                prompt, MBPP_STOP_WORDS, n=num_candidates_generated, max_tokens=2048 if has_k_shot else args.max_tokens,
                 temperature=args.temperature, top_p=args.top_p,
             )
             all_code = [choice['text'] for choice in response['choices']]
@@ -198,10 +201,10 @@ def evaluate_code_generic(args, model):
     print(f'attempt success: {successes}/{attempts} ({successes/attempts*100:.2f}%); ({attempts / total_problems:.2f} per-problem)')
     return problems_passed / total_problems
 
-if __name__ == '__main__':
+def make_parser():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_name", type=str, required=True)
-    parser.add_argument("--tokenizer_name", type=str, choices=["gpt2", "gpt2_pretokenization_newlines_only"])
+    add_model_args(parser)
+
     parser.add_argument('--timeout', type=int, default=10)
     parser.add_argument('--output_path', type=str, default=None)
     parser.add_argument("--num_candidates_generated", type=int, default=15)
@@ -209,18 +212,20 @@ if __name__ == '__main__':
     parser.add_argument('--verbose', action='store_true')
     parser.add_argument('--verbose_candidates', type=int, default=5)
 
-    parser.add_argument("--temperature", type=float, default=0.6)
-    parser.add_argument("--top_p", type=float, default=0.95)
-
-    parser.add_argument("--batch_size", type=int)
-
-    parser.add_argument("--prompt_prefix")
-    parser.add_argument("--candidate_scoring", choices=["mean", "sum", "random"], default="mean")
-
     parser.add_argument("--k_shot", type=int)
     parser.add_argument("--prompt_template", choices=["google", "comment"], default="comment")
 
+    parser.add_argument("--git_status", action="store_true")
+
+if __name__ == '__main__':
+    print(' '.join(sys.argv))
+    parser = make_parser()
     args = parser.parse_args()
+
+    pprint.pprint(vars(args))
+    if args.git_status:
+        dump_git_status()
+        dump_version_info()
 
     random.seed(1)
 

@@ -10,7 +10,8 @@ outdir="expts/he_infill/${name}"
 mkdir -p $outdir
 
 python infill_evaluation.py \
-  --model_path code-davinci-001 \
+  --git_status \
+  --model_name code-davinci-001 \
   --candidate_scoring $scoring \
   --bidirectional_scoring \
   --batch_size 10 \

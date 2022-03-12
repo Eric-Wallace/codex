@@ -11,20 +11,12 @@ from collections import defaultdict
 from human_eval.data import write_jsonl, read_problems
 from human_eval.evaluation import evaluate_functional_correctness
 
-from utils import build_systematic_infill_prompt
+from utils import build_systematic_infill_prompt, all_equal, unpickle, dump_git_status, dump_version_info
 
-from models import make_model, Model
+from models import make_model, Model, add_model_args
 
 # can't include print since the codex API will only handle up to 4 stop words
 HUMAN_EVAL_STOP_WORDS = ["\nclass", "\ndef", "\n#", "\nif"]
-
-def all_equal(iterable):
-    iterable = list(iterable)
-    return all(iterable[0] == x for x in iterable)
-
-def unpickle(filename):
-    with open(filename, 'rb') as f:
-        return pickle.load(f)
 
 def combine_responses(list_of_responses):
     assert all_equal(resp.keys() for resp in list_of_responses)
@@ -104,8 +96,9 @@ def remove_test_cases(prompt):
 
 def make_parser():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_name", type=str)
-    parser.add_argument("--tokenizer_name", type=str, choices=["gpt2", "gpt2_pretokenization_newlines_only"])
+
+    add_model_args(parser)
+
     parser.add_argument("--num_problems", type=int)
     parser.add_argument("--num_candidates_generated", type=int, default=15)
     parser.add_argument("--num_candidates_evaluated", type=int, default=1)
@@ -116,30 +109,23 @@ def make_parser():
     parser.add_argument("--remove_test_cases", default=False, action='store_true')
     parser.add_argument("--verbose", action="store_true")
 
-    parser.add_argument("--temperature", type=float, default=0.6)
-    parser.add_argument("--top_p", type=float, default=0.95)
-    parser.add_argument("--beam", type=int, default=1)
-    parser.add_argument("--unnormalized", action="store_true")
+    parser.add_argument("--git_status", action="store_true")
 
-    parser.add_argument("--batch_size", type=int)
-
-    parser.add_argument("--prompt_prefix")
-    parser.add_argument("--candidate_scoring", choices=["mean", "sum", "random"], default="mean")
     return parser
 
 
 if __name__ == "__main__":
     print(' '.join(sys.argv))
+
     parser = make_parser()
-
     args = parser.parse_args()
-    pprint.pprint(vars(args))
 
-    if args.model_name is None:
-        assert args.cached_responses, "must pass --model_name=<model> or --cached_responses"
-        model = Model()
-    else:
-        model = make_model(args, args.model_name, args.tokenizer_name, prompt_prefix=args.prompt_prefix)
+    pprint.pprint(vars(args))
+    if args.git_status:
+        dump_git_status()
+        dump_version_info()
+
+    model = make_model(args)
 
     problems = list(sorted(read_problems().items()))
     if args.num_problems is not None:
@@ -165,7 +151,7 @@ if __name__ == "__main__":
             # candidates: [{'text': text, 'logprobs': {...}}, ...]
             candidates, response = model.rank_completions(
                 prompt, HUMAN_EVAL_STOP_WORDS,
-                max_tokens=450,
+                max_tokens=args.max_tokens,
                 n=args.num_candidates_generated,
                 # if we've cached responses, use the cached
                 cached_response=responses.get(task_id) if args.cached_responses else None,
