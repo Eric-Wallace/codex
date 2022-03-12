@@ -15,6 +15,8 @@ except:
 
 from utils import truncate_overlap, truncate_num_lines, stripped_line_split
 
+DEFAULT_MAX_TOKENS = 450
+
 CODEX_RETRY_DELAY_SECONDS = 60
 CODEX_MAX_RETRIES = 30
 
@@ -58,7 +60,7 @@ def add_model_args(parser):
     parser.add_argument("--batch_size", type=int)
     parser.add_argument("--prompt_prefix")
     parser.add_argument("--candidate_scoring", choices=["mean", "sum", "random"], default="mean")
-    parser.add_argument("--max_tokens", type=int, default=128)
+    parser.add_argument("--max_tokens", type=int, default=DEFAULT_MAX_TOKENS)
 
 def add_infilling_args(parser):
     parser.add_argument("--truncation_heuristics", nargs='*', choices=TruncationParameters.HEURISTICS, default=["num_lines"])
@@ -124,7 +126,7 @@ class Model:
                 raise NotImplementedError(f"scoring {scoring}")
         return list(sorted(choices, key=scoring_fn, reverse=True))
 
-    def rank_completions(self, prompt: str, stop_words: List[str], cached_response=None, scoring='mean', sampling=True, temperature=0.6, top_p=0.95, n=1, max_tokens=128, beam=1):
+    def rank_completions(self, prompt: str, stop_words: List[str], cached_response=None, scoring='mean', sampling=True, temperature=0.6, top_p=0.95, n=1, max_tokens=DEFAULT_MAX_TOKENS, beam=1):
         if cached_response is None:
             response = self.complete(prompt, stop_words, sampling=sampling, temperature=temperature, top_p=top_p, n=n, max_tokens=max_tokens, beam=beam)
         else:
@@ -135,7 +137,7 @@ class Model:
     def rank_infills(self, parts: List[str], verbose=False, bidirectional_scoring=False, bidirectional_generation=False,
                     cached_response=None, scoring='mean',
                     truncation_parameters: List[TruncationParameters] = None,
-                    sampling=True, temperature=0.6, top_p=0.95, n=1, max_tokens=128, beam=1):
+                    sampling=True, temperature=0.6, top_p=0.95, n=1, max_tokens=DEFAULT_MAX_TOKENS, beam=1):
         if truncation_parameters is None:
             truncation_parameters = [TruncationParameters(None, None) for _ in parts[:-1]]
         assert len(truncation_parameters) == len(parts) - 1
@@ -219,7 +221,7 @@ class HFModel(Model):
     def encode_stop_words(self, stop_words: List[str]):
         return [self.lm_tokenizer.encode(string) for string in stop_words]
 
-    def complete(self, prompt, stop_words: List[str], sampling=True, max_tokens=128, top_p=0.95, n=1, num_log_probs=1, temperature=0.6, beam=1):
+    def complete(self, prompt, stop_words: List[str], sampling=True, max_tokens=DEFAULT_MAX_TOKENS, top_p=0.95, n=1, num_log_probs=1, temperature=0.6, beam=1):
         ''' This function runs GPT-2 locally using HF transformers but places the outputs into an json that looks just like the one
         provided by the OpenAI API. '''
 
@@ -406,7 +408,7 @@ class FairseqModel(Model):
                 all_scores.append(score.item())
         return all_scores
 
-    def complete(self, prompt: str, stop_words: List[str], sampling=True, max_tokens=128, top_p=0.95, n=1, num_log_probs=1, temperature=0.6, beam=1):
+    def complete(self, prompt: str, stop_words: List[str], sampling=True, max_tokens=DEFAULT_MAX_TOKENS, top_p=0.95, n=1, num_log_probs=1, temperature=0.6, beam=1):
         ''' This function runs fairseq LM locally but places the outputs into an json that looks just like the one
         provided by the OpenAI API. '''
 
@@ -561,7 +563,7 @@ class CausalMasking(FairseqModel):
         token_ids = torch.tensor(tokens)
         return self.tokenizer.decode((token_ids - self.TOKENIZER_OFFSET).tolist(), skip_special_tokens=False)
 
-    def infill(self, parts: List[str], verbose=False, n=1, truncation_parameters: List[TruncationParameters]=None, sampling=True, max_tokens=128, top_p=0.95, temperature=0.0, beam=1):
+    def infill(self, parts: List[str], verbose=False, n=1, truncation_parameters: List[TruncationParameters]=None, sampling=True, max_tokens=DEFAULT_MAX_TOKENS, top_p=0.95, temperature=0.0, beam=1):
         # Force the model to fill in code in between each string in parts
         # see code_to_docstring and docstring_to_code for example usages
         if truncation_parameters is None:
