@@ -412,7 +412,7 @@ class FairseqModel(Model):
         assert encoded_prompt.dim() == 1
         prompt_len = len(encoded_prompt)
 
-        from fairseq.priming_generator import GreedyDecoding, TopPSampling
+        from priming_generator import GreedyDecoding, TopPSampling
         # strip EOS from end
         if encoded_prompt[-1].item() == self.eos:
             encoded_prompt = encoded_prompt[:-1]
