@@ -408,9 +408,48 @@ class FairseqModel(Model):
                 all_scores.append(score.item())
         return all_scores
 
+    def _generate(self, encoded_prompt: torch.tensor, max_tokens, top_p=0.95, n=1, temperature=0.6):
+        assert encoded_prompt.dim() == 1
+        prompt_len = len(encoded_prompt)
+
+        from fairseq.priming_generator import GreedyDecoding, TopPSampling
+        # strip EOS from end
+        if encoded_prompt[-1].item() == self.eos:
+            encoded_prompt = encoded_prompt[:-1]
+        if temperature == 0:
+            decoder = GreedyDecoding(self.lm_model, min_len=prompt_len, max_len=max_tokens+prompt_len, temperature=temperature, show_tqdm=False)
+        else:
+            decoder = TopPSampling(self.lm_model, min_len=prompt_len, max_len=max_tokens+prompt_len, sampling_topp=top_p, temperature=temperature, show_tqdm=False)
+
+        decoder = decoder.to(self.lm_model.device)
+        encoded_prompt = encoded_prompt.to(self.lm_model.device)
+
+        all_tokens = []
+        all_log_probs = []
+        while len(all_tokens) < n:
+            completion_tokens, completion_token_log_probs = decoder.decode(
+                encoded_prompt.to(self.lm_model.device),
+                return_log_probs=True,
+                stop_on_eos=True
+            )
+            # remove initial EOS
+            assert completion_tokens[0].item() == self.eos
+            completion_tokens = completion_tokens[1:]
+            completion_token_log_probs = completion_token_log_probs[1:]
+            assert torch.allclose(completion_tokens[:prompt_len], encoded_prompt)
+            if completion_tokens[-1] == self.eos:
+                completion_tokens = completion_tokens[:-1]
+                completion_token_log_probs = completion_token_log_probs[:-1]
+            assert completion_tokens.size() == completion_token_log_probs.size()
+            all_tokens.append(completion_tokens[prompt_len:])
+            all_log_probs.append(completion_token_log_probs)
+        return all_tokens, all_log_probs
+
     def complete(self, prompt: str, stop_words: List[str], sampling=True, max_tokens=DEFAULT_MAX_TOKENS, top_p=0.95, n=1, num_log_probs=1, temperature=0.6, beam=1):
         ''' This function runs fairseq LM locally but places the outputs into an json that looks just like the one
         provided by the OpenAI API. '''
+
+        assert beam == 1, "beam search is not implemented"
 
         batch_size = n if self.batch_size is None else self.batch_size
 
@@ -420,54 +459,30 @@ class FairseqModel(Model):
         if num_log_probs != 1:
             raise NotImplementedError()
 
-        lm_model = self.lm_model
-
         stop_words = stop_words + self._extra_stop_words
 
         if self.prompt_prefix is not None:
             # TODO: add option to not insert newline
             prompt = f"{self.prompt_prefix}\n{prompt}"
 
-        choices = []
-        with torch.no_grad():
+        encoded_prompt = self._encode(prompt)
 
-            encoded_prompt = self._encode(prompt)
-            prompt_len = len(encoded_prompt)
+        all_tokens, all_log_probs = self._generate(
+            encoded_prompt: torch.tensor, 
+            max_tokens=max_tokens,
+            top_p=top_p,
+            n=n,
+            temperature=temperature,
+        )
 
-            lm_model.cfg.generation['max_len_b'] = max_tokens + prompt_len
-
-            if False:
-                # prepend EOS
-                encoded_prompt = torch.cat((torch.tensor(2).unsqueeze(-1), encoded_prompt))
-
-            completions = []
-            while len(completions) < n:
-                this_n = min(batch_size, n - len(completions))
-                # total_sequences is now the input + possible generated output
-                if temperature == 0:
-                    assert n==1
-                    this_completions = lm_model.generate(
-                        [encoded_prompt], sampling=False, beam=beam,
-                    )
-                else:
-                    assert beam == 1, "cannot have a non-zero temperature and beam != 1"
-                    # the beam argument to generate actually just specifies the num of candidates to sample, when sampling=True
-                    this_completions = lm_model.generate(
-                        [encoded_prompt], sampling=True, beam=this_n, sampling_topp=top_p, temperature=temperature,
-                    )
-                # only completing a single sequence
-                this_completions = this_completions[0]
-                completions.extend(this_completions)
-            assert len(completions) == n
-            # -1 to remove EOS, both from encoded prompt and from completion
-            all_tokens = [completion['tokens'][prompt_len-1:-1] for completion in completions]
-            # TODO: these scores are post-temperature-scaling log probs. is this consistent with HF and codex?
-            all_logprobs = [completion['positional_scores'][prompt_len-1:-1] for completion in completions]
+        assert len(all_tokens) == n
+        assert len(all_log_probs) == n
 
         # construct batched tokens
         # create the return value to resemble OpenAI
+        choices = []
         return_json = {}
-        for completion_ix in range(len(completions)):
+        for completion_ix in range(len(all_tokens)):
             curr_json = {}
 
             # remove EOS
@@ -628,6 +643,8 @@ class CausalMasking(FairseqModel):
                 if completion[-1] == 2:
                     completion = completion[:-1]
                     scores = scores[:-1]
+
+            # TODO: replace the code above with a call to _generate, making sure to check that EOS are accounted for in the prefix removal below (they may have been added, so len(ids) might not be the right thing to use? maybe other stuff too)
 
             completion = completion[len(ids):]
             scores = scores[len(ids):]
