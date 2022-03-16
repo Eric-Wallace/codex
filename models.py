@@ -468,7 +468,7 @@ class FairseqModel(Model):
         encoded_prompt = self._encode(prompt)
 
         all_tokens, all_log_probs = self._generate(
-            encoded_prompt: torch.tensor, 
+            encoded_prompt,
             max_tokens=max_tokens,
             top_p=top_p,
             n=n,
@@ -488,7 +488,7 @@ class FairseqModel(Model):
             # remove EOS
             # seq = total_sequences[batch_id][-max_tokens-1:-1]
             full_seq = all_tokens[completion_ix].cpu()
-            full_logprobs = all_logprobs[completion_ix]
+            full_logprobs = all_log_probs[completion_ix]
             assert len(full_seq) == len(full_logprobs)
 
             # search for stopwords, to truncate after them
@@ -625,26 +625,22 @@ class CausalMasking(FairseqModel):
             with torch.no_grad():
                 # print("completing: ")
                 # print(self._decode(ids))
-                if temperature == 0:
-                    assert n==1
-                    # print("not sampling")
-                    outputs = model.generate(
-                        [torch.tensor(ids)], sampling=False, beam=beam,
-                    )
-                else:
-                    # TODO: batch
-                    assert beam == 1, "cannot have a non-zero temperature and beam != 1"
-                    # the beam argument to generate actually just specifies the num of candidates to sample, when sampling=True
-                    outputs = model.generate(
-                        [torch.tensor(ids)], sampling=True, beam=n, sampling_topp=top_p, temperature=temperature,
-                    )
-                completion = outputs[0][0]['tokens'].tolist()
-                scores = outputs[0][0]['positional_scores']
+                all_tokens, all_log_probs = self._generate(
+                    ids,
+                    max_tokens=max_tokens,
+                    top_p=top_p,
+                    n=n,
+                    temperature=temperature,
+                )
+                completion = all_tokens[0].tolist()
+                scores = all_log_probs[0]
                 if completion[-1] == 2:
                     completion = completion[:-1]
                     scores = scores[:-1]
 
-            # TODO: replace the code above with a call to _generate, making sure to check that EOS are accounted for in the prefix removal below (they may have been added, so len(ids) might not be the right thing to use? maybe other stuff too)
+            # TODO: make sure to check that EOS are accounted for in the prefix removal below 
+            # (they may have been added, so len(ids) might not be the right thing to use? maybe 
+            # other stuff too)
 
             completion = completion[len(ids):]
             scores = scores[len(ids):]
