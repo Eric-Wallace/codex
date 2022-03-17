@@ -145,7 +145,7 @@ class Model:
                     truncation_parameters: List[TruncationParameters] = None,
                     sampling=True, temperature=0.6, top_p=0.95, n=1, max_tokens=DEFAULT_MAX_TOKENS, beam=1):
         if truncation_parameters is None:
-            truncation_parameters = [TruncationParameters(None, None) for _ in parts[:-1]]
+            truncation_parameters = [TruncationParameters(None, None, False) for _ in parts[:-1]]
         assert len(truncation_parameters) == len(parts) - 1
 
         if len(parts) != 2:
@@ -611,7 +611,7 @@ class CausalMasking(FairseqModel):
         # Force the model to fill in code in between each string in parts
         # see code_to_docstring and docstring_to_code for example usages
         if truncation_parameters is None:
-            truncation_parameters = [TruncationParameters(None, None) for _ in parts[:-1]]
+            truncation_parameters = [TruncationParameters(None, None, False) for _ in parts[:-1]]
         else:
             raise NotImplementedError("truncation_parameters for infill()")
 

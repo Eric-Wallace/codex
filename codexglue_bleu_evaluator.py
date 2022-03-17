@@ -1,4 +1,10 @@
 #!/usr/bin/python
+"""From https://github.com/microsoft/CodeXGLUE/tree/main/Code-Text/code-to-text (evaluator/evaluator.py)
+
+Call with:
+
+    python codexglue_bleu_evaluator.py ref_file < hyp_file
+"""
 
 '''
 This script was adapted from the original version by hieuhoang1972 which is part of MOSES. 

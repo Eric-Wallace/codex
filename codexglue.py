@@ -35,8 +35,10 @@ def run_codexglue_code_to_text(args, model: Model, result_base_path=None):
 
     all_results = []
 
-    with tqdm.tqdm(problem_iterator[start:], ncols=120) as pbar:
+    with tqdm.tqdm(problem_iterator, ncols=120) as pbar:
         for i, problem in enumerate(pbar):
+            if i < start:
+                continue
             try:
                 prompt_parts = problem["prompt_parts"]
                 truncation_parameters = [
@@ -68,21 +70,14 @@ def run_codexglue_code_to_text(args, model: Model, result_base_path=None):
                 if i % 50 == 0:
                     result_txt.flush()
             except Exception as e:
-                print(f"Error on {i}: will write empty output for this example")
+                print(f"Error on {i}")
                 print(e)
-                result_txt.write(f"{i}\t\n")
                 import pdb; pdb.set_trace()
 
-    if args.resume:
-        with open(result_pkl_fname, "rb") as f:
-            old_results = pickle.load(f)
-        all_results = old_results + all_results
-
-        with open(result_pkl_fname, "wb") as f:
-            pickle.dump(all_results, f)
-    else:
-        with open(result_pkl_fname, "wb") as f:
-            pickle.dump(all_results, f)
+    # Note: since we don't save until the end of the run, these results are
+    #  incomplete if we're resuming
+    with open(result_pkl_fname, "wb") as f:
+        pickle.dump(all_results, f)
 
     result_txt.close()
 
