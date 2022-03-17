@@ -117,6 +117,8 @@ class Model:
 
     def _rank_helper(self, choices, scoring):
         assert scoring in ['mean', 'sum', 'random']
+        if len(choices) == 1:
+            return choices
         def scoring_fn(choice):
             if scoring == 'random':
                 return random.random()
@@ -156,7 +158,18 @@ class Model:
 
         if cached_response is None:
             if bidirectional_generation:
-                response = self.infill([prefix, suffix], truncation_parameters=[trunc_params], verbose=verbose, sampling=sampling, temperature=temperature, top_p=top_p, n=n, max_tokens=max_tokens, beam=beam)
+                response = self.infill(
+                    [prefix, suffix],
+                    # can pass None for this since we will truncate afterward
+                    truncation_parameters=None,
+                    verbose=verbose,
+                    sampling=sampling,
+                    temperature=temperature,
+                    top_p=top_p,
+                    n=n,
+                    max_tokens=max_tokens,
+                    beam=beam
+                )
             else:
                 response = self.complete(prefix, stop_words=[], sampling=sampling, temperature=temperature, top_p=top_p, n=n, max_tokens=max_tokens, beam=beam)
         else:
@@ -412,9 +425,51 @@ class FairseqModel(Model):
                 all_scores.append(score.item())
         return all_scores
 
+    def _generate(self, encoded_prompt: torch.tensor, max_tokens, top_p=0.95, n=1, temperature=0.6):
+        if isinstance(encoded_prompt, list):
+            encoded_prompt = torch.tensor(encoded_prompt)
+        assert encoded_prompt.dim() == 1
+        prompt_len = len(encoded_prompt)
+        from priming_generator import GreedyDecoding, TopPSampling
+        # strip EOS from end
+        if temperature == 0:
+            decoder = GreedyDecoding(self.lm_model, min_len=prompt_len, max_len=max_tokens+prompt_len, temperature=1.0, show_tqdm=False)
+        else:
+            decoder = TopPSampling(self.lm_model, min_len=prompt_len, max_len=max_tokens+prompt_len, sampling_topp=top_p, temperature=temperature, show_tqdm=False)
+        if encoded_prompt[-1].item() == decoder.eos:
+            encoded_prompt = encoded_prompt[:-1]
+
+        decoder = decoder.to(self.lm_model.device)
+        encoded_prompt = encoded_prompt.to(self.lm_model.device)
+
+        stop_on_ids = {decoder.eos}
+
+        all_tokens = []
+        all_log_probs = []
+        while len(all_tokens) < n:
+            completion_tokens, completion_token_log_probs = decoder.decode(
+                encoded_prompt.to(self.lm_model.device),
+                return_log_probs=True,
+                stop_on_ids=stop_on_ids,
+            )
+            # remove initial EOS
+            assert completion_tokens[0].item() == decoder.eos
+            completion_tokens = completion_tokens[1:]
+            completion_token_log_probs = completion_token_log_probs[1:]
+            if completion_tokens[-1].item() in stop_on_ids:
+                completion_tokens = completion_tokens[:-1]
+                completion_token_log_probs = completion_token_log_probs[:-1]
+            assert completion_tokens.size() == completion_token_log_probs.size()
+            assert torch.allclose(completion_tokens[:len(encoded_prompt)], encoded_prompt)
+            all_tokens.append(completion_tokens[len(encoded_prompt):])
+            all_log_probs.append(completion_token_log_probs[len(encoded_prompt):])
+        return all_tokens, all_log_probs
+
     def complete(self, prompt: str, stop_words: List[str], sampling=True, max_tokens=DEFAULT_MAX_TOKENS, top_p=0.95, n=1, num_log_probs=1, temperature=0.6, beam=1):
         ''' This function runs fairseq LM locally but places the outputs into an json that looks just like the one
         provided by the OpenAI API. '''
+
+        assert beam == 1, "beam search is not implemented"
 
         batch_size = n if self.batch_size is None else self.batch_size
 
@@ -424,61 +479,40 @@ class FairseqModel(Model):
         if num_log_probs != 1:
             raise NotImplementedError()
 
-        lm_model = self.lm_model
-
         stop_words = stop_words + self._extra_stop_words
 
         if self.prompt_prefix is not None:
             # TODO: add option to not insert newline
             prompt = f"{self.prompt_prefix}\n{prompt}"
 
-        choices = []
-        with torch.no_grad():
+        encoded_prompt = self._encode(prompt)
 
-            encoded_prompt = self._encode(prompt)
-            prompt_len = len(encoded_prompt)
+        all_tokens, all_log_probs = self._generate(
+            encoded_prompt,
+            max_tokens=max_tokens,
+            top_p=top_p,
+            n=n,
+            temperature=temperature,
+        )
 
-            lm_model.cfg.generation['max_len_b'] = max_tokens + prompt_len
-
-            if False:
-                # prepend EOS
-                encoded_prompt = torch.cat((torch.tensor(2).unsqueeze(-1), encoded_prompt))
-
-            completions = []
-            while len(completions) < n:
-                this_n = min(batch_size, n - len(completions))
-                # total_sequences is now the input + possible generated output
-                if temperature == 0:
-                    assert n==1
-                    this_completions = lm_model.generate(
-                        [encoded_prompt], sampling=False, beam=beam,
-                    )
-                else:
-                    assert beam == 1, "cannot have a non-zero temperature and beam != 1"
-                    # the beam argument to generate actually just specifies the num of candidates to sample, when sampling=True
-                    this_completions = lm_model.generate(
-                        [encoded_prompt], sampling=True, beam=this_n, sampling_topp=top_p, temperature=temperature,
-                    )
-                # only completing a single sequence
-                this_completions = this_completions[0]
-                completions.extend(this_completions)
-            assert len(completions) == n
-            # -1 to remove EOS, both from encoded prompt and from completion
-            all_tokens = [completion['tokens'][prompt_len-1:-1] for completion in completions]
-            # TODO: these scores are post-temperature-scaling log probs. is this consistent with HF and codex?
-            all_logprobs = [completion['positional_scores'][prompt_len-1:-1] for completion in completions]
+        assert len(all_tokens) == n
+        assert len(all_log_probs) == n
 
         # construct batched tokens
         # create the return value to resemble OpenAI
+        choices = []
         return_json = {}
-        for completion_ix in range(len(completions)):
+        for completion_ix in range(len(all_tokens)):
             curr_json = {}
 
             # remove EOS
             # seq = total_sequences[batch_id][-max_tokens-1:-1]
             full_seq = all_tokens[completion_ix].cpu()
-            full_logprobs = all_logprobs[completion_ix]
+            full_logprobs = all_log_probs[completion_ix]
             assert len(full_seq) == len(full_logprobs)
+
+            # print("full seq:")
+            # print(full_seq)
 
             # search for stopwords, to truncate after them
             full_seq_decoded = self._decode(full_seq)
@@ -565,13 +599,21 @@ class CausalMasking(FairseqModel):
 
     def _decode(self, tokens):
         token_ids = torch.tensor(tokens)
-        return self.tokenizer.decode((token_ids - self.TOKENIZER_OFFSET).tolist(), skip_special_tokens=False)
+        token_ids_offset = token_ids - self.TOKENIZER_OFFSET
+        # for i in range(len(token_ids_offset)):
+        #     if token_ids_offset[i] < 0:
+        #         print(f"warning: found invalid token {token_ids_offset[i]} at index {i} in {token_ids_offset}")
+        #         token_ids_offset = token_ids_offset[:i]
+        #         break
+        return self.tokenizer.decode((token_ids_offset).tolist(), skip_special_tokens=False)
 
     def infill(self, parts: List[str], verbose=False, n=1, truncation_parameters: List[TruncationParameters]=None, sampling=True, max_tokens=DEFAULT_MAX_TOKENS, top_p=0.95, temperature=0.0, beam=1):
         # Force the model to fill in code in between each string in parts
         # see code_to_docstring and docstring_to_code for example usages
         if truncation_parameters is None:
             truncation_parameters = [TruncationParameters(None, None) for _ in parts[:-1]]
+        else:
+            raise NotImplementedError("truncation_parameters for infill()")
 
         assert len(truncation_parameters) == len(parts) - 1
         model = self.lm_model
@@ -614,27 +656,22 @@ class CausalMasking(FairseqModel):
             with torch.no_grad():
                 # print("completing: ")
                 # print(self._decode(ids))
-                if temperature == 0:
-                    assert n==1
-                    # print("not sampling")
-                    outputs = model.generate(
-                        [torch.tensor(ids)], sampling=False, beam=beam,
-                    )
-                else:
-                    # TODO: batch
-                    assert beam == 1, "cannot have a non-zero temperature and beam != 1"
-                    # the beam argument to generate actually just specifies the num of candidates to sample, when sampling=True
-                    outputs = model.generate(
-                        [torch.tensor(ids)], sampling=True, beam=n, sampling_topp=top_p, temperature=temperature,
-                    )
-                completion = outputs[0][0]['tokens'].tolist()
-                scores = outputs[0][0]['positional_scores']
+                all_tokens, all_log_probs = self._generate(
+                    torch.tensor(ids),
+                    max_tokens=max_tokens,
+                    top_p=top_p,
+                    n=n,
+                    temperature=temperature,
+                )
+                completion = all_tokens[0].tolist()
+                scores = all_log_probs[0]
                 if completion[-1] == 2:
                     completion = completion[:-1]
                     scores = scores[:-1]
 
-            completion = completion[len(ids):]
-            scores = scores[len(ids):]
+            # TODO: make sure to check that EOS are accounted for in the prefix removal below 
+            # (they may have been added, so len(ids) might not be the right thing to use? maybe 
+            # other stuff too)
 
             if self.EOSS_ID in completion:
                 t = completion.index(self.EOSS_ID)+1
