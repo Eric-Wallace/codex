@@ -49,6 +49,7 @@ class DecodingBase(nn.Module):
         self.language_model = transformer_language_model
         self.dictionary: Dictionary = transformer_language_model.task.source_dictionary
         self.model = transformer_language_model.models[0]
+        self.bos = self.dictionary.bos()
         self.eos = self.dictionary.eos()
         self.pad = self.dictionary.pad()
         self.min_len = min_len
@@ -57,7 +58,7 @@ class DecodingBase(nn.Module):
         self.dummy_param = nn.Parameter(torch.empty(0))
         self.show_tqdm = show_tqdm
 
-    def decode(self, prefix: Optional[torch.Tensor] = None, return_log_probs=False, stop_on_eos=False) -> torch.Tensor:
+    def decode(self, prefix: Optional[torch.Tensor] = None, return_log_probs=False, stop_on_ids=None) -> torch.Tensor:
         with torch.no_grad():
             if prefix is None:
                 prefix = torch.tensor([self.eos]).to(self.dummy_param.device)
@@ -113,12 +114,15 @@ class DecodingBase(nn.Module):
                 else:
                     tokens[:, step] = self.choice(logprobs.squeeze(0))
                 token = tokens.squeeze(0)[step]
+                # print(f"{step} {token}")
                 token_log_probs[:, step] = logprobs.squeeze(0)[token]
-                if stop_on_eos and token.item() == self.eos:
+                if stop_on_ids and token.item() in stop_on_ids:
                     if step < len(prefix):
-                        print("warning: EOS stopping within prefix", step, prefix)
+                        print(f"warning: stopping on {token.item()} at step {step} within prefix {prefix}")
                     tokens = tokens[:, :step+1]
                     token_log_probs = token_log_probs[:, :step+1]
+                    # print(f"breaking on {token.item()}")
+                    # print(logprobs[:4])
                     break
             if return_log_probs:
                 return tokens.squeeze(0), token_log_probs.squeeze(0)
@@ -135,8 +139,8 @@ class GreedyDecoding(DecodingBase):
 
 
 class TopPSampling(DecodingBase):
-    def __init__(self, transformer_language_model: GeneratorHubInterface, min_len: int, max_len: int, sampling_topp: float, temperature: float = 1.0):
-        super().__init__(transformer_language_model, min_len, max_len, temperature)
+    def __init__(self, transformer_language_model: GeneratorHubInterface, min_len: int, max_len: int, sampling_topp: float, temperature: float = 1.0, show_tqdm=True):
+        super().__init__(transformer_language_model, min_len, max_len, temperature, show_tqdm)
         self.sampling_topp = sampling_topp
 
     def choice(self, logprob: torch.Tensor) -> int:

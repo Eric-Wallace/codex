@@ -411,18 +411,19 @@ class FairseqModel(Model):
     def _generate(self, encoded_prompt: torch.tensor, max_tokens, top_p=0.95, n=1, temperature=0.6):
         assert encoded_prompt.dim() == 1
         prompt_len = len(encoded_prompt)
-
         from priming_generator import GreedyDecoding, TopPSampling
         # strip EOS from end
-        if encoded_prompt[-1].item() == self.eos:
-            encoded_prompt = encoded_prompt[:-1]
         if temperature == 0:
-            decoder = GreedyDecoding(self.lm_model, min_len=prompt_len, max_len=max_tokens+prompt_len, temperature=temperature, show_tqdm=False)
+            decoder = GreedyDecoding(self.lm_model, min_len=prompt_len, max_len=max_tokens+prompt_len, temperature=1.0, show_tqdm=False)
         else:
             decoder = TopPSampling(self.lm_model, min_len=prompt_len, max_len=max_tokens+prompt_len, sampling_topp=top_p, temperature=temperature, show_tqdm=False)
+        if encoded_prompt[-1].item() == decoder.eos:
+            encoded_prompt = encoded_prompt[:-1]
 
         decoder = decoder.to(self.lm_model.device)
         encoded_prompt = encoded_prompt.to(self.lm_model.device)
+
+        stop_on_ids = {decoder.eos}
 
         all_tokens = []
         all_log_probs = []
@@ -430,19 +431,19 @@ class FairseqModel(Model):
             completion_tokens, completion_token_log_probs = decoder.decode(
                 encoded_prompt.to(self.lm_model.device),
                 return_log_probs=True,
-                stop_on_eos=True
+                stop_on_ids=stop_on_ids,
             )
             # remove initial EOS
-            assert completion_tokens[0].item() == self.eos
+            assert completion_tokens[0].item() == decoder.eos
             completion_tokens = completion_tokens[1:]
             completion_token_log_probs = completion_token_log_probs[1:]
-            assert torch.allclose(completion_tokens[:prompt_len], encoded_prompt)
-            if completion_tokens[-1] == self.eos:
+            if completion_tokens[-1].item() in stop_on_ids:
                 completion_tokens = completion_tokens[:-1]
                 completion_token_log_probs = completion_token_log_probs[:-1]
             assert completion_tokens.size() == completion_token_log_probs.size()
-            all_tokens.append(completion_tokens[prompt_len:])
-            all_log_probs.append(completion_token_log_probs)
+            assert torch.allclose(completion_tokens[:len(encoded_prompt)], encoded_prompt)
+            all_tokens.append(completion_tokens[len(encoded_prompt):])
+            all_log_probs.append(completion_token_log_probs[len(encoded_prompt):])
         return all_tokens, all_log_probs
 
     def complete(self, prompt: str, stop_words: List[str], sampling=True, max_tokens=DEFAULT_MAX_TOKENS, top_p=0.95, n=1, num_log_probs=1, temperature=0.6, beam=1):
@@ -490,6 +491,9 @@ class FairseqModel(Model):
             full_seq = all_tokens[completion_ix].cpu()
             full_logprobs = all_log_probs[completion_ix]
             assert len(full_seq) == len(full_logprobs)
+
+            # print("full seq:")
+            # print(full_seq)
 
             # search for stopwords, to truncate after them
             full_seq_decoded = self._decode(full_seq)
@@ -576,7 +580,13 @@ class CausalMasking(FairseqModel):
 
     def _decode(self, tokens):
         token_ids = torch.tensor(tokens)
-        return self.tokenizer.decode((token_ids - self.TOKENIZER_OFFSET).tolist(), skip_special_tokens=False)
+        token_ids_offset = token_ids - self.TOKENIZER_OFFSET
+        # for i in range(len(token_ids_offset)):
+        #     if token_ids_offset[i] < 0:
+        #         print(f"warning: found invalid token {token_ids_offset[i]} at index {i} in {token_ids_offset}")
+        #         token_ids_offset = token_ids_offset[:i]
+        #         break
+        return self.tokenizer.decode((token_ids_offset).tolist(), skip_special_tokens=False)
 
     def infill(self, parts: List[str], verbose=False, n=1, truncation_parameters: List[TruncationParameters]=None, sampling=True, max_tokens=DEFAULT_MAX_TOKENS, top_p=0.95, temperature=0.0, beam=1):
         # Force the model to fill in code in between each string in parts
