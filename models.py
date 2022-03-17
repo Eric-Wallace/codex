@@ -113,6 +113,8 @@ class Model:
 
     def _rank_helper(self, choices, scoring):
         assert scoring in ['mean', 'sum', 'random']
+        if len(choices) == 1:
+            return choices
         def scoring_fn(choice):
             if scoring == 'random':
                 return random.random()
@@ -152,7 +154,18 @@ class Model:
 
         if cached_response is None:
             if bidirectional_generation:
-                response = self.infill([prefix, suffix], truncation_parameters=[trunc_params], verbose=verbose, sampling=sampling, temperature=temperature, top_p=top_p, n=n, max_tokens=max_tokens, beam=beam)
+                response = self.infill(
+                    [prefix, suffix],
+                    # can pass None for this since we will truncate afterward
+                    truncation_parameters=None,
+                    verbose=verbose,
+                    sampling=sampling,
+                    temperature=temperature,
+                    top_p=top_p,
+                    n=n,
+                    max_tokens=max_tokens,
+                    beam=beam
+                )
             else:
                 response = self.complete(prefix, stop_words=[], sampling=sampling, temperature=temperature, top_p=top_p, n=n, max_tokens=max_tokens, beam=beam)
         else:
@@ -409,6 +422,8 @@ class FairseqModel(Model):
         return all_scores
 
     def _generate(self, encoded_prompt: torch.tensor, max_tokens, top_p=0.95, n=1, temperature=0.6):
+        if isinstance(encoded_prompt, list):
+            encoded_prompt = torch.tensor(encoded_prompt)
         assert encoded_prompt.dim() == 1
         prompt_len = len(encoded_prompt)
         from priming_generator import GreedyDecoding, TopPSampling
@@ -593,6 +608,8 @@ class CausalMasking(FairseqModel):
         # see code_to_docstring and docstring_to_code for example usages
         if truncation_parameters is None:
             truncation_parameters = [TruncationParameters(None, None) for _ in parts[:-1]]
+        else:
+            raise NotImplementedError("truncation_parameters for infill()")
 
         assert len(truncation_parameters) == len(parts) - 1
         model = self.lm_model
@@ -636,7 +653,7 @@ class CausalMasking(FairseqModel):
                 # print("completing: ")
                 # print(self._decode(ids))
                 all_tokens, all_log_probs = self._generate(
-                    ids,
+                    torch.tensor(ids),
                     max_tokens=max_tokens,
                     top_p=top_p,
                     n=n,
@@ -651,9 +668,6 @@ class CausalMasking(FairseqModel):
             # TODO: make sure to check that EOS are accounted for in the prefix removal below 
             # (they may have been added, so len(ids) might not be the right thing to use? maybe 
             # other stuff too)
-
-            completion = completion[len(ids):]
-            scores = scores[len(ids):]
 
             if self.EOSS_ID in completion:
                 t = completion.index(self.EOSS_ID)+1
