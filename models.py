@@ -13,22 +13,22 @@ try:
 except:
     print("couldn't import torch; won't be able to use most models", file=sys.stderr)
 
-from utils import truncate_overlap, truncate_num_lines, stripped_line_split
+from utils import truncate_overlap, truncate_num_lines, stripped_line_split, truncate_docstring_infill
 
 DEFAULT_MAX_TOKENS = 450
 
 CODEX_RETRY_DELAY_SECONDS = 60
 CODEX_MAX_RETRIES = 30
 
-_TruncationParameters = namedtuple("_TruncationParameters", ["max_num_lines", "suffix"])
+_TruncationParameters = namedtuple("_TruncationParameters", ["max_num_lines", "suffix", "is_docstring_infill"])
 class TruncationParameters(_TruncationParameters):
     SUFFIX_NUM_CONSECUTIVE_LINES = 2
 
-    HEURISTICS = ["num_lines", "suffix"]
+    HEURISTICS = ["num_lines", "suffix", "comment"]
 
     @staticmethod
-    def from_heuristics(truncation_heuristics: List[str], missing_lines: str, suffix: str):
-        tp = TruncationParameters(None, None)
+    def from_heuristics(truncation_heuristics: List[str], missing_lines: str = None, suffix: str = None):
+        tp = TruncationParameters(None, None, False)
         for heuristic in truncation_heuristics:
             assert heuristic in TruncationParameters.HEURISTICS
             if heuristic == "num_lines":
@@ -36,6 +36,8 @@ class TruncationParameters(_TruncationParameters):
                 tp = tp._replace(max_num_lines=num_lines)
             elif heuristic == "suffix":
                 tp = tp._replace(suffix=suffix)
+            elif heuristic == "comment":
+                tp = tp._replace(is_docstring_infill=True)
             else:
                 raise NotImplementedError(f"heuristic {heuristic}")
         return tp
@@ -49,6 +51,8 @@ class TruncationParameters(_TruncationParameters):
             infill_truncated = truncate_overlap(infill, self.suffix, minimum_num_suffix_lines=self.SUFFIX_NUM_CONSECUTIVE_LINES)
         if self.max_num_lines is not None:
             infill_truncated = truncate_num_lines(infill_truncated, max_num_lines=self.max_num_lines)
+        if self.is_docstring_infill:
+            infill_truncated = truncate_docstring_infill(infill_truncated)
         return infill_truncated
 
 def add_model_args(parser):
@@ -142,7 +146,7 @@ class Model:
                     truncation_parameters: List[TruncationParameters] = None,
                     sampling=True, temperature=0.6, top_p=0.95, n=1, max_tokens=DEFAULT_MAX_TOKENS, beam=1):
         if truncation_parameters is None:
-            truncation_parameters = [TruncationParameters(None, None) for _ in parts[:-1]]
+            truncation_parameters = [TruncationParameters(None, None, False) for _ in parts[:-1]]
         assert len(truncation_parameters) == len(parts) - 1
 
         if len(parts) != 2:
@@ -604,7 +608,7 @@ class CausalMasking(FairseqModel):
         # Force the model to fill in code in between each string in parts
         # see code_to_docstring and docstring_to_code for example usages
         if truncation_parameters is None:
-            truncation_parameters = [TruncationParameters(None, None) for _ in parts[:-1]]
+            truncation_parameters = [TruncationParameters(None, None, False) for _ in parts[:-1]]
         else:
             raise NotImplementedError("truncation_parameters for infill()")
         

@@ -1,86 +1,106 @@
-from typing import List
+import sys
+import argparse
+import pprint
+import pickle
+import tqdm
 
 from datasets import load_dataset
 
-from utils import build_docstring_infill_prompt, truncate_docstring_infill
-from causal_masking_infill import infill
+from utils import build_docstring_infill_prompt, dump_git_status, dump_version_info
+from models import make_model, Model, add_infilling_args, add_model_args, TruncationParameters
 
-class CodeDataset:
+def run_codexglue_code_to_text(args, model: Model, result_base_path=None):
+    data = load_dataset("code_x_glue_ct_code_to_text", "python", split="test")
 
-    def __init__(self):
-        # load data
-        self.data = ...
+    all_results = []
+    problem_iterator = [{
+        "id": d["id"],
+        "prompt_parts": build_docstring_infill_prompt(d["original_string"], docstring_text=d["docstring"])
+    } for d in data]
 
-    def get_prompt_parts(self, i: int) -> List[str]:
-        """Gets the text prompt for example i.
+    if result_base_path is not None:
+        result_txt_fname = f"{result_base_path}.txt"
+        result_pkl_fname = f"{result_base_path}.pkl"
+    else:
+        result_txt_fname = "codexglue_code_to_text.txt"
+        result_pkl_fname = "codexglue_code_to_text.pkl"
+    if args.resume:
+        start = sum(1 for line in open(result_txt_fname))
+        print(f"==== Resuming from line {start} of {result_txt_fname} ====")
+        result_txt = open(result_txt_fname, "a")
+    else:
+        start = 0
+        print(f"==== Writing results to new file {result_txt_fname} ====")
+        result_txt = open(result_txt_fname, "w")
 
-        Returns:
-            list of prompt parts (where the model must fill in text between each part, for cloze-type tasks)
-            if just a "vanilla" prompt, a list of length 1
-        """
-        raise NotImplementedError()
+    all_results = []
 
-    def evaluate(self, i: int, model_completion: str):
-        """Given the model completion for example i, returns a bool indicating whether
-        the problem was solved."""
-        raise NotImplementedError()
+    with tqdm.tqdm(problem_iterator, ncols=120) as pbar:
+        for i, problem in enumerate(pbar):
+            if i < start:
+                continue
+            try:
+                prompt_parts = problem["prompt_parts"]
+                truncation_parameters = [
+                        TruncationParameters.from_heuristics(args.truncation_heuristics)
+                    ]
+                kwargs = dict(
+                    verbose=False, n=args.num_candidates,
+                    bidirectional_generation=args.bidirectional_generation, bidirectional_scoring=args.bidirectional_scoring,
+                    truncation_parameters=truncation_parameters,
+                    scoring=args.candidate_scoring,
+                )
+                if args.max_tokens is not None:
+                    kwargs['max_tokens'] = args.max_tokens
+                kwargs.update(sampling=True, top_p=args.top_p, temperature=args.temperature, beam=args.beam)
+                sorted_choices, response = model.rank_infills(prompt_parts, **kwargs)
+                top_choice = sorted_choices[0]
 
-class CodeXGlueClozeAllDataset(CodeDataset):
-    
-    def __init__(self):
-        self.data = load_dataset("code_x_glue_cc_cloze_testing_all", "python", split="train")
+                infill_result = problem.copy()
+                infill_result["text"] = top_choice["infills"][0]
+                infill_result["complete"] = top_choice["complete"]
+                infill_result["text_untruncated"] = top_choice["infills_untruncated"][0]
 
-    def get_prompt_parts(self, i):
-        pass
-#        example = self.data[i]
-#        code_toks = example["pl_tokens"]
-#        docstring = " ".join(example["nl_tokens"])
-#
-#        function_def = " ".join(code_toks[:code_toks.index(":") + 1])
-#        code_toks = code_toks[code_toks.index(":") + 1:]
-#        body_pre_mask = " ".join(
-#                code_toks[code_toks.index(":") + 1:code_toks.index("<mask>")])
-#
-#        prompt_prefix = f"{function_def}\n    {TRIPLE_QUOTE}{docstring}{TRIPLE_QUOTE}\n{body_pre_mask}"
-#        prompt_suffix = " ".join(code_toks[code_toks.index("<mask>") + 1:])
-#        return [prompt_prefix, prompt_suffix]
+                pbar.set_postfix({"output": infill_result["text"]})
 
-class CodeXGlueCodeSummDataset(CodeDataset):
+                all_results.append(infill_result)
 
-    def __init__(self):
-        self.data = load_dataset("code_x_glue_ct_code_to_text", "python", split="test")
+                # Write docstring to file for BLEU eval
+                result_txt.write(f"{i}\t{infill_result['text']}\n")
+                if i % 50 == 0:
+                    result_txt.flush()
+            except Exception as e:
+                print(f"Error on {i}")
+                print(e)
+                import pdb; pdb.set_trace()
 
-    def get_prompt_parts(self, i):
-        return build_docstring_infill_prompt(self.data[i]["original_string"], docstring_text=self.data[i]["docstring"])
+    # Note: since we don't save until the end of the run, these results are
+    #  incomplete if we're resuming
+    with open(result_pkl_fname, "wb") as f:
+        pickle.dump(all_results, f)
 
-    def evaluate(self, i, model_completion):
-        pass
+    result_txt.close()
+
+def make_parser():
+    parser = argparse.ArgumentParser()
+    add_model_args(parser)
+    add_infilling_args(parser)
+
+    parser.add_argument("--result_base_path")
+    parser.add_argument("--git_status", action="store_true")
+    parser.add_argument("--resume", action="store_true")
+
+    return parser
+
 
 if __name__ == "__main__":
-    ds = CodeXGlueCodeSummDataset()
+    print(' '.join(sys.argv))
+    parser = make_parser()
+    args = parser.parse_args()
+    pprint.pprint(vars(args))
+    if args.git_status:
+        dump_git_status()
+        dump_version_info()
 
-    outputs = []
-
-    output_f = open("6b_code_summ_preds_greedy.txt", "w")
-
-    for i in range(len(ds.data)):
-        try:
-            prompt_parts = ds.get_prompt_parts(i)
-            out = infill(prompt_parts, verbose=False, sampling=False)
-            pred_infill = out["infills"][0]
-            docstr = truncate_docstring_infill(pred_infill)
-        except Exception as e:
-            print(e)
-            docstr = ""
-            import pdb; pdb.set_trace()
-        output_f.write(f"{i}\t{docstr}\n")
-        if i % 50 == 0:
-            output_f.flush()
-        outputs.append(docstr)
-        print(i)
-        print(docstr)
-
-    with open("6b_code_summ_preds_greedy.pkl", "wb") as f:
-        pickle.dump(outputs, f)
-
-    output_f.close()
+    model = make_model(args)
+    run_codexglue_code_to_text(args, model, result_base_path=args.result_base_path)
