@@ -447,7 +447,7 @@ class FairseqModel(Model):
         encoded_stop_words = [[decoder.eos]]
         if extra_encoded_stop_words is not None:
             for esw in extra_encoded_stop_words:
-                if isinstance(esw, torch.tensor):
+                if isinstance(esw, torch.Tensor):
                     esw = esw.tolist()
                 assert isinstance(esw, list)
                 assert isinstance(esw[0], int)
