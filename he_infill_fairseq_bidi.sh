@@ -2,15 +2,13 @@
 
 num_candidates=$1
 temperature=$2
+suffix=$3
+shift
+shift
+shift
 
-beam=$3
-
-if [ -z $beam ]
-then
-  beam=1
-fi
-
-name="cm-6B-armen_last_bidi-gen_ncg-${num_candidates}_temp-${temperature}_no-samp_beam-${beam}"
+name="cm-6B-armen_last_bidi-gen_ncg-${num_candidates}_temp-${temperature}_${suffix}"
+# name="cm-6B-armen_last_pg_bidi-gen_ncg-${num_candidates}_temp-${temperature}_no-samp_beam-${beam}"
 
 outdir="expts/he_infill/${name}"
 mkdir -p $outdir
@@ -22,10 +20,10 @@ python infill_evaluation.py \
   --candidate_scoring random \
   --batch_size 10 \
   --eval_type one_line \
-  --truncation_heuristics num_lines suffix \
+  --max_tokens 30 \
   --temperature ${temperature} \
-  --beam ${beam} \
   --num_candidates ${num_candidates} \
   --bidirectional_generation \
   --result_base_path ${outdir}/results \
+  $@ \
   | tee ${outdir}/log.out

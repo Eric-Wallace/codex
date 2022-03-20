@@ -127,7 +127,12 @@ def evaluate_code_generic(args, model):
 
     try:
         os.system(f'mkdir -p {output_path}')
-        bar = tqdm(dataset.data_splits['evaluation'], ncols=80)
+        print(f"split: {args.split}")
+        data = dataset.data_splits[args.split]
+        if args.n_examples:
+            print(f"filtering to {args.n_examples} examples")
+            data = data[:args.n_examples]
+        bar = tqdm(data, ncols=80)
         for i, item in enumerate(bar):
             this_attempts = 0
             some_attempt_passed = False
@@ -214,8 +219,11 @@ def make_parser():
 
     parser.add_argument("--k_shot", type=int)
     parser.add_argument("--prompt_template", choices=["google", "comment"], default="comment")
+    parser.add_argument("--split", choices=["evaluation", "prompting", "training"], default="evaluation")
+    parser.add_argument("--n_examples", type=int)
 
     parser.add_argument("--git_status", action="store_true")
+    return parser
 
 if __name__ == '__main__':
     print(' '.join(sys.argv))
@@ -231,5 +239,5 @@ if __name__ == '__main__':
 
     dataset = MBPPDataset()
 
-    model = make_model(args, args.model_name, args.tokenizer_name, prompt_prefix=args.prompt_prefix)
+    model = make_model(args)
     evaluate_code_generic(args, model)

@@ -67,6 +67,7 @@ def add_infilling_args(parser):
     parser.add_argument("--bidirectional_generation", action="store_true", help="for infilling, generate candidates using both left and right contexts")
     parser.add_argument("--bidirectional_scoring", action="store_true", help="for infilling, rerank generated candidates using the left and right contexts")
     parser.add_argument("--num_candidates", type=int, default=10, help="number of candidates to use in infilling reranking")
+    parser.add_argument("--max_infill_attempts", type=int, default=1, help="number of times to retry for a complete infill")
 
 class Model:
     def encode_stop_words(self, stop_words: List[str]):
@@ -216,7 +217,7 @@ class Model:
         return sorted_choices, response
 
 class HFModel(Model):
-    def __init__(self, model_name, tokenizer_name=None, prompt_prefix=None, batch_size=None):
+    def __init__(self, model_name, prompt_prefix=None, batch_size=None):
         if prompt_prefix is not None:
             raise NotImplementedError("--prompt_prefix for HFModel")
         from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -225,8 +226,7 @@ class HFModel(Model):
         self.lm_model = GPTJForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16, low_cpu_mem_usage=True)
         self.lm_model.eval().cuda()
     
-        if tokenizer_name is None:
-            tokenizer_name = model_name
+        tokenizer_name = args.tokenizer_name
         self.lm_tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
 
         self.batch_size = batch_size
@@ -330,8 +330,9 @@ class HFModel(Model):
         return return_json
 
 class FairseqModel(Model):
-    def __init__(self, args: argparse.Namespace, model_path: str, tokenizer_name=None, gpt2_encoder_json=None, gpt2_vocab_bpe=None, prompt_prefix=None, batch_size=None, model=None):
+    def __init__(self, args: argparse.Namespace, model_path: str, prompt_prefix=None, batch_size=None, model=None):
         self.args = args
+        tokenizer_name = args.tokenizer_name
         if tokenizer_name is None:
             bpe = "gpt2_pretokenization_newlines_only"
         else:
@@ -343,13 +344,8 @@ class FairseqModel(Model):
         assert os.path.exists(model_path), f"model_path {model_path} should be a file"
         model_root_dir = os.path.dirname(model_path)
         model_basename = os.path.basename(model_path)
-        if gpt2_encoder_json is None:
-            gpt2_encoder_json = os.path.join(model_root_dir, "vocab.json")
-        if gpt2_vocab_bpe is None:
-            gpt2_vocab_bpe = os.path.join(model_root_dir, "merges.txt")
-
-        self.gpt2_encoder_json = gpt2_encoder_json
-        self.gpt2_vocab_bpe = gpt2_vocab_bpe
+        self.gpt2_encoder_json = gpt2_encoder_json = os.path.join(model_root_dir, "vocab.json")
+        self.gpt2_vocab_bpe = gpt2_vocab_bpe = os.path.join(model_root_dir, "merges.txt")
 
         print(f"model_root_dir: {model_root_dir}")
         print(f"model_basename: {model_basename}")
@@ -387,9 +383,12 @@ class FairseqModel(Model):
     def _extra_stop_words(self):
         return ["<| ", "<|/ ", "<code>", "</code>", "<cell>", "</cell>"]
 
-    def _encode(self, text: str):
+    def _encode(self, text: str, strip_eos=False):
         # -> torch.tensor
-        return self.lm_model.encode(text)
+        encoded = self.lm_model.encode(text)
+        if strip_eos and encoded[-1].item() == self.eos_index:
+            encoded = encoded[:-1]
+        return encoded
 
     def _decode(self, tokens) -> str:
         # tokens: torch.tensor
@@ -421,7 +420,7 @@ class FairseqModel(Model):
                 all_scores.append(score.item())
         return all_scores
 
-    def _generate(self, encoded_prompt: torch.tensor, max_tokens, top_p=0.95, n=1, temperature=0.6):
+    def _generate(self, encoded_prompt: torch.tensor, max_tokens, top_p=0.95, n=1, temperature=0.6, extra_encoded_stop_words=None):
         if isinstance(encoded_prompt, list):
             encoded_prompt = torch.tensor(encoded_prompt)
         assert encoded_prompt.dim() == 1
@@ -438,7 +437,12 @@ class FairseqModel(Model):
         decoder = decoder.to(self.lm_model.device)
         encoded_prompt = encoded_prompt.to(self.lm_model.device)
 
-        stop_on_ids = {decoder.eos}
+        encoded_stop_words = [[decoder.eos]]
+        if extra_encoded_stop_words is not None:
+            for esw in extra_encoded_stop_words:
+                assert isinstance(esw, list)
+                assert isinstance(esw[0], int)
+                encoded_stop_words.append(esw)
 
         all_tokens = []
         all_log_probs = []
@@ -446,15 +450,12 @@ class FairseqModel(Model):
             completion_tokens, completion_token_log_probs = decoder.decode(
                 encoded_prompt.to(self.lm_model.device),
                 return_log_probs=True,
-                stop_on_ids=stop_on_ids,
+                encoded_stop_words=encoded_stop_words,
             )
             # remove initial EOS
             assert completion_tokens[0].item() == decoder.eos
             completion_tokens = completion_tokens[1:]
             completion_token_log_probs = completion_token_log_probs[1:]
-            if completion_tokens[-1].item() in stop_on_ids:
-                completion_tokens = completion_tokens[:-1]
-                completion_token_log_probs = completion_token_log_probs[:-1]
             assert completion_tokens.size() == completion_token_log_probs.size()
             assert torch.allclose(completion_tokens[:len(encoded_prompt)], encoded_prompt)
             all_tokens.append(completion_tokens[len(encoded_prompt):])
@@ -481,7 +482,8 @@ class FairseqModel(Model):
             # TODO: add option to not insert newline
             prompt = f"{self.prompt_prefix}\n{prompt}"
 
-        encoded_prompt = self._encode(prompt)
+        encoded_prompt = self._encode(prompt, strip_eos=True)
+        encoded_stop_words = [self._encode(stop_word, strip_eos=True) for stop_word in stop_words]
 
         all_tokens, all_log_probs = self._generate(
             encoded_prompt,
@@ -489,6 +491,7 @@ class FairseqModel(Model):
             top_p=top_p,
             n=n,
             temperature=temperature,
+            extra_encoded_stop_words=encoded_stop_words,
         )
 
         assert len(all_tokens) == n
@@ -501,14 +504,9 @@ class FairseqModel(Model):
         for completion_ix in range(len(all_tokens)):
             curr_json = {}
 
-            # remove EOS
-            # seq = total_sequences[batch_id][-max_tokens-1:-1]
             full_seq = all_tokens[completion_ix].cpu()
             full_logprobs = all_log_probs[completion_ix]
             assert len(full_seq) == len(full_logprobs)
-
-            # print("full seq:")
-            # print(full_seq)
 
             # search for stopwords, to truncate after them
             full_seq_decoded = self._decode(full_seq)
@@ -525,8 +523,7 @@ class FairseqModel(Model):
                 seq_decoded = full_seq_decoded[:min_index]
                 # figure out how many tokens to take from log probs by reencoding the truncated string
                 # TODO: this may not exactly be right since this I don't think BPE is a prefix code
-                # -1 to remove EOS
-                seq = self._encode(seq_decoded)[:-1]
+                seq = self._encode(seq_decoded, strip_eos=True)
                 logprobs = full_logprobs[:len(seq)]
             else:
                 print('no stopword found!') # not having any stopword found is probably a very bad sign
@@ -534,7 +531,6 @@ class FairseqModel(Model):
                 seq_decoded = full_seq_decoded
 
             curr_json['text'] = seq_decoded
-            
         
             # fill the return json with the top tokens and probs to match the OpenAI return value.
             curr_json['logprobs'] = {}
@@ -574,21 +570,22 @@ class CausalMasking(FairseqModel):
     def _extra_stop_words(self):
         return super()._extra_stop_words + self._special_tokens
 
-    def __init__(self, args, model_path: str, bpe="gpt2_pretokenization_newlines_only", gpt2_encoder_json=None, gpt2_vocab_bpe=None, prompt_prefix=None, batch_size=None, model=None):
-        super().__init__(args, model_path, bpe, gpt2_encoder_json, gpt2_vocab_bpe, prompt_prefix, batch_size=batch_size, model=model)
-        assert bpe in {"gpt2_pretokenization_newlines_only", "bpe"}
+    def __init__(self, args, model_path: str, prompt_prefix=None, batch_size=None, model=None):
+        super().__init__(args, model_path, prompt_prefix, batch_size=batch_size, model=model)
         from tokenizers import ByteLevelBPETokenizer
         self.tokenizer = tokenizer = ByteLevelBPETokenizer.from_file(
             # these will be set by super().__init__
             self.gpt2_encoder_json, self.gpt2_vocab_bpe,
-            pretokenizer_split_newlines_only=(bpe=="gpt2_pretokenization_newlines_only"),
+            pretokenizer_split_newlines_only=(self.bpe=="gpt2_pretokenization_newlines_only"),
         )
         tokenizer.add_special_tokens(self._special_tokens)
 
         self.EOSS_ID = tokenizer.token_to_id(self.EOSS) + self.TOKENIZER_OFFSET
 
-    def _encode(self, text, include_eos=True):
-        if include_eos:
+        self.extra_sentinel = True
+
+    def _encode(self, text, strip_eos=False):
+        if not strip_eos:
             return torch.tensor(self.tokenizer.encode(text).ids + [self.eos_index - self.TOKENIZER_OFFSET]) + self.TOKENIZER_OFFSET
         else:
             return torch.tensor(self.tokenizer.encode(text).ids) + self.TOKENIZER_OFFSET
@@ -610,106 +607,119 @@ class CausalMasking(FairseqModel):
             truncation_parameters = [TruncationParameters(None, None) for _ in parts[:-1]]
         else:
             raise NotImplementedError("truncation_parameters for infill()")
-
+        
         assert len(truncation_parameters) == len(parts) - 1
         model = self.lm_model
         assert isinstance(parts, list)
         assert len(parts) > 1
 
+        parts_without_prompt_prefix = parts
         if self.prompt_prefix is not None:
-            raise NotImplementedError()
             parts = parts.copy()
             parts[0] = f"{self.prompt_prefix}\n{parts[0]}"
 
         infills = []
 
-        ids = []
+        prompt = []
         
         if n != 1:
             raise NotImplementedError()
 
         # encode parts separated by sentinel
         for sentinel_ix, part in enumerate(parts):
-            part_tokens = self._encode(part, include_eos=False)
-            ids.extend(part_tokens.tolist())
+            part_tokens = self._encode(part, strip_eos=True)
+            prompt.extend(part_tokens.tolist())
             if sentinel_ix < len(parts) - 1:
-                ids.append(self.sentinel_id(sentinel_ix))
-
-        infills = []
-
-        complete = []
-
-        infill_scores = []
-        infill_tokens = []
-
-        # autoregressively fill in
-        for sentinel_ix, part in enumerate(parts[:-1]):
-            ids.append(self.sentinel_id(sentinel_ix))
-            model.cfg.generation['max_len_b'] = max_tokens + len(ids)
-            if verbose:
-                print(part, end="")
-                print(f"<sentinel:{sentinel_ix}>", end="")
-            with torch.no_grad():
-                # print("completing: ")
-                # print(self._decode(ids))
-                all_tokens, all_log_probs = self._generate(
-                    torch.tensor(ids),
-                    max_tokens=max_tokens,
-                    top_p=top_p,
-                    n=n,
-                    temperature=temperature,
-                )
-                completion = all_tokens[0].tolist()
-                scores = all_log_probs[0]
-                if completion[-1] == 2:
-                    completion = completion[:-1]
-                    scores = scores[:-1]
-
-            # TODO: make sure to check that EOS are accounted for in the prefix removal below 
-            # (they may have been added, so len(ids) might not be the right thing to use? maybe 
-            # other stuff too)
-
-            if self.EOSS_ID in completion:
-                t = completion.index(self.EOSS_ID)+1
-                completion = completion[:t]
-                scores = scores[:t]
-                # TODO: handle this better: we do want to include the score for EOSS (if we use these scores somewhere)
-                # but how do we handle the case where EOSS is not present (below) without biasing toward those candidates?
-                scores = scores[:-1]
+                prompt.append(self.sentinel_id(sentinel_ix))
             else:
-                if not verbose:
-                    print(f"warning: {self.EOSS} not found", file=sys.stderr)
-                completion = completion + [self.EOSS_ID]
+                # only makes sense to add an extra sentinel if we do have some text coming later, otherwise, we tend to just end the region immediately
+                if self.extra_sentinel and len(part) > 0:
+                    prompt.append(self.sentinel_id(sentinel_ix))
 
-            ids.extend(completion)
+        for attempt_num in range(1, self.args.max_infill_attempts+1):
+            ids = prompt.copy()
+            infills = []
 
-            infill_tokens.append(completion[:-1])
-            infill_scores.append(scores)
+            complete = []
 
-            decoded = self._decode(completion[:-1])
-            # print("decoded:")
-            # print(decoded)
-            # print()
-            complete.append(part)
-            complete.append(decoded)
-            infills.append(decoded)
+            infill_scores = []
+            infill_tokens = []
+
+            generated_all_eoss = True
+
+            # autoregressively fill in
+            for sentinel_ix, part in enumerate(parts[:-1]):
+                ids.append(self.sentinel_id(sentinel_ix))
+                model.cfg.generation['max_len_b'] = max_tokens + len(ids)
+                if verbose:
+                    print(part, end="")
+                    print(f"<sentinel:{sentinel_ix}>", end="")
+                with torch.no_grad():
+                    # print("completing: ")
+                    # print(self._decode(ids))
+                    all_tokens, all_log_probs = self._generate(
+                        torch.tensor(ids),
+                        max_tokens=max_tokens,
+                        top_p=top_p,
+                        n=n,
+                        temperature=temperature,
+                        extra_encoded_stop_words=[[self.EOSS_ID]]
+                    )
+                    completion = all_tokens[0].tolist()
+                    scores = all_log_probs[0]
+                    if completion[-1] == 2:
+                        completion = completion[:-1]
+                        scores = scores[:-1]
+
+                # TODO: make sure to check that EOS are accounted for in the prefix removal below 
+                # (they may have been added, so len(ids) might not be the right thing to use? maybe 
+                # other stuff too)
+
+                if self.EOSS_ID in completion:
+                    t = completion.index(self.EOSS_ID)+1
+                    completion = completion[:t]
+                    scores = scores[:t]
+                    # TODO: handle this better: we do want to include the score for EOSS (if we use these scores somewhere)
+                    # but how do we handle the case where EOSS is not present (below) without biasing toward those candidates?
+                    scores_no_eoss = scores[:-1]
+                else:
+                    if not verbose:
+                        print(f"warning: {self.EOSS} not found; completion len {len(completion)}", file=sys.stderr)
+                        print("last part:")
+                        print(part)
+                        print("next part:")
+                        print(parts[sentinel_ix+1])
+                        print("completion")
+                        print(completion)
+                        print(self._decode(completion))
+                    scores_no_eoss = scores
+                    completion = completion + [self.EOSS_ID]
+                    generated_all_eoss = False
+                    if self.args.max_infill_attempts > 1:
+                        break
+                ids.extend(completion)
+
+                completion_no_eoss = completion[:-1]
+
+                infill_tokens.append(completion_no_eoss)
+                infill_scores.append(scores_no_eoss)
+
+                decoded = self._decode(completion_no_eoss)
+                complete.append(parts_without_prompt_prefix[sentinel_ix])
+                complete.append(decoded)
+                infills.append(decoded)
+            if generated_all_eoss:
+                # don't need to retry
+                break
 
         complete.append(parts[-1])
-
-        # if verbose:
-        #     print(parts[-1])
-        #     print("-"*20)
-        #     print(''.join((complete)))
-
-        # decoded_tokens = [ [self._decode([t]) for t in completion] for completion in infill_tokens]
-        # print("complete:")
-        # print(complete)
-        # print()
 
         choice = {
             'complete': complete,
             'infills_untruncated': infills,
             'ids': ids,
+            'infill_attempts': attempt_num,
+            'generated_all_eoss': generated_all_eoss,
             # 'raw': self._decode(ids),
             'logprobs': {
                 'token_logprobs': infill_scores,
@@ -763,6 +773,7 @@ class CodeGPT2(Model):
         }
 
 class OpenAIModel(Model):
+    END_OF_TEXT = '<|endoftext|>'
 
     def __init__(self, engine='davinci-codex', persistent=True, prompt_prefix=None):
         if prompt_prefix is not None:
@@ -778,11 +789,21 @@ class OpenAIModel(Model):
         for text in text_batch:
             response = self.complete(text, None, max_tokens=0, temperature=1.0, echo=True)
             choice = response['choices'][0]
-            log_probs = choice["logprobs"]['token_logprobs'][1:]
+            token_log_probs = choice['logprobs']['token_logprobs']
+            tokens = choice['logprobs']['tokens']
+
+            if self.END_OF_TEXT in tokens:
+                ix = tokens.index(self.END_OF_TEXT)
+                # keep the token, so that we have the score for ending the seq, but remove everything afterward
+                tokens = tokens[:ix+1]
+                token_log_probs = token_log_probs[:ix+1]
+
+            # remove None at the beginning -- no probability for the initial token, since there's no BOS
+            token_log_probs = token_log_probs[1:]
             if scoring == 'sum':
-                score = np.sum(log_probs)
+                score = np.sum(token_log_probs)
             elif scoring == 'mean':
-                score = np.mean(log_probs)
+                score = np.mean(token_log_probs)
             else:
                 raise NotImplementedError(f"scoring {scoring}")
             all_scores.append(score)
@@ -835,6 +856,10 @@ def make_model(args, cached_model=None):
             raise NotImplementedError("prompt prefix for codex models")
         return OpenAIModel(model_name, persistent=True)
     elif 'fairseq' or '/checkpoint' in model_name:
+        if "gpt2tok" in model_name:
+            assert tokenizer_name == "gpt2"
+        else:
+            assert tokenizer_name == "gpt2_pretokenization_newlines_only"
         if 'cm-' in model_name:
             return CausalMasking(args, model_name, prompt_prefix=prompt_prefix, batch_size=args.batch_size, model=cached_model)
         elif 'lm-' in model_name:

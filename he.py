@@ -35,7 +35,8 @@ def generate_he_infill_problems(args, eval_type="one_line"):
 
     for i, (task_id, problem) in enumerate(problems):
         soln = problem["canonical_solution"].rstrip() # note we strip extra newlines
-        num_lines = len(soln.split("\n"))
+        lines = soln.split("\n")
+        num_lines = len(lines)
         
         num_lines_to_mask = []        
         if eval_type == "one_line":
@@ -54,6 +55,10 @@ def generate_he_infill_problems(args, eval_type="one_line"):
                     soln,
                     num_before,
                     num_after)
+
+            # if this region is all whitespace, skip it
+            if not missing_lines.strip():
+                continue
             
             task_id_problems.append({
                 "task_id": task_id,

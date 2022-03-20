@@ -7,7 +7,7 @@ from torch import nn
 from fairseq.data import Dictionary
 from fairseq.hub_utils import GeneratorHubInterface
 from fairseq.models.transformer_lm import TransformerLanguageModel
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 from tqdm import tqdm
 
 
@@ -58,7 +58,13 @@ class DecodingBase(nn.Module):
         self.dummy_param = nn.Parameter(torch.empty(0))
         self.show_tqdm = show_tqdm
 
-    def decode(self, prefix: Optional[torch.Tensor] = None, return_log_probs=False, stop_on_ids=None) -> torch.Tensor:
+    def decode(self, prefix: Optional[torch.Tensor] = None, return_log_probs=False, encoded_stop_words: List[List[int]]=None) -> torch.Tensor:
+        if encoded_stop_words is None:
+            encoded_stop_words = []
+        encoded_stop_words = [[self.eos]] + encoded_stop_words
+        for esw in encoded_stop_words:
+            assert isinstance(esw, list)
+            assert isinstance(esw[0], int)
         with torch.no_grad():
             if prefix is None:
                 prefix = torch.tensor([self.eos]).to(self.dummy_param.device)
@@ -116,13 +122,18 @@ class DecodingBase(nn.Module):
                 token = tokens.squeeze(0)[step]
                 # print(f"{step} {token}")
                 token_log_probs[:, step] = logprobs.squeeze(0)[token]
-                if stop_on_ids and token.item() in stop_on_ids:
-                    if step < len(prefix):
-                        print(f"warning: stopping on {token.item()} at step {step} within prefix {prefix}")
-                    tokens = tokens[:, :step+1]
-                    token_log_probs = token_log_probs[:, :step+1]
-                    # print(f"breaking on {token.item()}")
-                    # print(logprobs[:4])
+                found_stop = False
+                for esw in encoded_stop_words:
+                    if tokens[:, step+1-len(esw):step+1].squeeze(0).tolist() == esw:
+                        if step < len(prefix):
+                            print(f"warning: stopping on {token.item()} at step {step} within prefix {prefix}")
+                        tokens = tokens[:, :step+1]
+                        token_log_probs = token_log_probs[:, :step+1]
+                        # print(f"breaking on {token.item()}")
+                        # print(logprobs[:4])
+                        found_stop = True
+                        break
+                if found_stop:
                     break
             if return_log_probs:
                 return tokens.squeeze(0), token_log_probs.squeeze(0)
