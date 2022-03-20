@@ -795,7 +795,8 @@ class CodeGPT2(Model):
 class OpenAIModel(Model):
     END_OF_TEXT = '<|endoftext|>'
 
-    def __init__(self, engine='davinci-codex', persistent=True, prompt_prefix=None):
+    def __init__(self, args, engine='davinci-codex', persistent=True, prompt_prefix=None):
+        self.args = args
         if prompt_prefix is not None:
             raise NotImplementedError("--prompt_prefix for OpenAIModel")
         self.engine = engine
@@ -835,13 +836,7 @@ class OpenAIModel(Model):
             all_scores.append(score)
         return all_scores
 
-    def complete(self, prompt, stop_words, max_tokens=450, top_p=0.95, temperature=0.6, sampling=True, beam=1, **kwargs):
-        if stop_words == []:
-            stop_words = None
-        if not sampling:
-            raise NotImplementedError()
-        if beam != 1:
-            raise NotImplementedError()
+    def _call(self, **kwargs):
         import openai
         from secret import API_KEY
         openai.api_key = API_KEY
@@ -854,13 +849,6 @@ class OpenAIModel(Model):
                 raise Exception("max number of retries failed")
             try:
                 response = openai.Completion.create(
-                    engine=self.engine,
-                    prompt=prompt,
-                    stop=stop_words,
-                    logprobs=1,
-                    max_tokens=max_tokens,
-                    top_p=top_p,
-                    temperature=temperature,
                     **kwargs
                 )
                 succeeded = True
@@ -869,6 +857,70 @@ class OpenAIModel(Model):
                     raise e
                 print(e)
                 time.sleep(CODEX_RETRY_DELAY_SECONDS)
+        return response
+
+    def complete(self, prompt, stop_words, max_tokens=450, top_p=0.95, temperature=0.6, sampling=True, beam=1, n=1, **kwargs):
+        if stop_words == []:
+            stop_words = None
+        if not sampling:
+            raise NotImplementedError()
+        if beam != 1:
+            raise NotImplementedError()
+        return self._call(
+            engine=self.engine,
+            prompt=prompt,
+            stop=stop_words,
+            logprobs=1,
+            max_tokens=max_tokens,
+            top_p=top_p,
+            temperature=temperature,
+            n=n,
+            **kwargs
+        )
+
+    def infill(self, parts: List[str], verbose=False, n=1, truncation_parameters: List[TruncationParameters]=None, sampling=True, max_tokens=DEFAULT_MAX_TOKENS, top_p=0.95, temperature=0.0, beam=1, **kwargs):
+        stop_words = None
+        if not sampling:
+            raise NotImplementedError()
+        if beam != 1:
+            raise NotImplementedError()
+
+        if len(parts) != 2:
+            raise NotImplementedError("can't infill more than 2 parts")
+        if truncation_parameters is None:
+            trunc_params = TruncationParameters(None, None, False)
+        else:
+            assert len(truncation_parameters) == 1
+            trunc_params = truncation_parameters[0]
+        choices = []
+        for attempt_num in range(1, self.args.max_infill_attempts+1):
+            response = self._call(
+                engine=self.engine,
+                prompt=parts[0],
+                suffix=parts[1],
+                stop=stop_words,
+                logprobs=1,
+                max_tokens=max_tokens,
+                top_p=top_p,
+                temperature=temperature,
+                n=n,
+                **kwargs,
+            )
+            finished_choices = [choice for choice in response['choices'] if choice['finish_reason'] == 'stop']
+            unfinished_choices = [choice for choice in response['choices'] if choice['finish_reason'] != 'stop']
+            # prioritize finished completions
+            choices.extend(finished_choices)
+            if len(choices) >= n:
+                break
+        # but if necessary, use unfinished choices
+        if len(choices) < n:
+            choices.extend(unfinished_choices)
+        choices = choices[:n]
+        assert len(choices) == n
+        for choice in choices:
+            choice['infills_untruncated'] = [choice['text']]
+            choice['text'] = trunc_params.truncate(choice['text'])
+        response['choices'] = choices
         return response
 
 def make_model(args, cached_model=None):
@@ -880,7 +932,7 @@ def make_model(args, cached_model=None):
     if 'davinci' in model_name or 'cushman' in model_name:
         if prompt_prefix is not None:
             raise NotImplementedError("prompt prefix for codex models")
-        return OpenAIModel(model_name, persistent=True)
+        return OpenAIModel(args, model_name, persistent=True)
     elif 'fairseq' or '/checkpoint' in model_name:
         if "gpt2tok" in model_name:
             assert tokenizer_name == "gpt2"
