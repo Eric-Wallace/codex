@@ -45,13 +45,22 @@ def run_systematic_infill(args, model: Model, eval_type="one_line", result_base_
     responses = {}
 
     functional_results = []
+    infill_attempts = []
+
+    def compute_metrics():
+        avg_pass = np.mean([x["passed"] for x in functional_results])
+        avg_exact = np.mean([x["exact_match"] for x in functional_results])
+        metrics = {'pass': avg_pass, 'exact': avg_exact}
+        if infill_attempts:
+            max_attempt_fraction = np.mean([a == args.max_infill_attempts for a in infill_attempts])
+            non_max_attempts = np.mean([a for a in infill_attempts if a != args.max_infill_attempts])
+            metrics.update(hit_max=max_attempt_fraction, avg_non_max=non_max_attempts)
+        return metrics
 
     with tqdm.tqdm(problem_iterator, ncols=120) as pbar:
         for i, (task_id, task_id_problems) in enumerate(pbar):
             if functional_results:
-                avg_pass = np.mean([x["passed"] for x in functional_results])
-                avg_exact = np.mean([x["exact_match"] for x in functional_results])
-                pbar.set_postfix({'pass': avg_pass, 'exact': avg_exact})
+                pbar.set_postfix(compute_metrics())
 
             humaneval_problem = problems[task_id]
             
@@ -85,6 +94,8 @@ def run_systematic_infill(args, model: Model, eval_type="one_line", result_base_
                 sorted_choices, response = model.rank_infills(prompt_parts, **kwargs)
 
                 top_choice = sorted_choices[0]
+                if "infill_attempts" in top_choice:
+                    infill_attempts.append(top_choice["infill_attempts"])
 
                 infill_result = infilling_problem.copy()
                 
@@ -112,6 +123,8 @@ def run_systematic_infill(args, model: Model, eval_type="one_line", result_base_
             result_json.write(json.dumps(result) + "\n")
             if i % 10 == 0:
                 result_json.flush()
+    
+    pprint.pprint(compute_metrics())
 
     with open(result_pkl_fname, "wb") as f:
         pickle.dump(all_results, f)

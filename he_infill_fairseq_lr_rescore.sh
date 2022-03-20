@@ -4,7 +4,7 @@ scoring=$1
 num_candidates=$2
 temperature=$3
 
-name="cm-6B-armen_last_lr-gen_scoring-${scoring}_ncg-${num_candidates}_temp-${temperature}"
+name="cm-6B-armen_last_lr-gen_pyprefix_scoring-${scoring}_ncg-${num_candidates}_temp-${temperature}"
 
 outdir="expts/he_infill/${name}"
 mkdir -p $outdir
@@ -21,4 +21,5 @@ python infill_evaluation.py \
   --temperature ${temperature} \
   --num_candidates ${num_candidates} \
   --result_base_path ${outdir}/results \
+  --prompt_prefix "<| file ext=.py |>" \
   | tee ${outdir}/log.out

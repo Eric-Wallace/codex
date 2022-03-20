@@ -5,6 +5,7 @@ num_candidates=$2
 temperature=$3
 
 name="code-davinci-001_lr-gen_scoring-${scoring}_ncg-${num_candidates}_temp-${temperature}"
+#name="davinci-codex_lr-gen_scoring-${scoring}_ncg-${num_candidates}_temp-${temperature}"
 
 outdir="expts/he_infill/${name}"
 mkdir -p $outdir
@@ -20,4 +21,5 @@ python infill_evaluation.py \
   --temperature ${temperature} \
   --num_candidates ${num_candidates} \
   --result_base_path ${outdir}/results \
+  --max_tokens 60 \
   | tee ${outdir}/log.out

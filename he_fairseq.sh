@@ -21,7 +21,7 @@ shift
 name=$1
 shift
 
-out_dir=expts/he/${model_name}_last_ncg-${ncg}_temp-${temperature}/${name}
+out_dir=expts/he/${model_name}_last_pg_ncg-${ncg}_temp-${temperature}/${name}
 
 mkdir -p $out_dir
 

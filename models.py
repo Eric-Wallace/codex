@@ -205,6 +205,9 @@ class Model:
                     'tokens': None,
                 }
             }
+            for key in ['infill_attempts', 'generated_all_eoss']:
+                if key in choice:
+                    d[key] = choice[key]
             choices.append(d)
 
         if bidirectional_scoring:
@@ -444,6 +447,8 @@ class FairseqModel(Model):
         encoded_stop_words = [[decoder.eos]]
         if extra_encoded_stop_words is not None:
             for esw in extra_encoded_stop_words:
+                if isinstance(esw, torch.tensor):
+                    esw = esw.tolist()
                 assert isinstance(esw, list)
                 assert isinstance(esw[0], int)
                 encoded_stop_words.append(esw)
@@ -487,7 +492,7 @@ class FairseqModel(Model):
             prompt = f"{self.prompt_prefix}\n{prompt}"
 
         encoded_prompt = self._encode(prompt, strip_eos=True)
-        encoded_stop_words = [self._encode(stop_word, strip_eos=True) for stop_word in stop_words]
+        encoded_stop_words = [self._encode(stop_word, strip_eos=True).tolist() for stop_word in stop_words]
 
         all_tokens, all_log_probs = self._generate(
             encoded_prompt,
@@ -687,7 +692,7 @@ class CausalMasking(FairseqModel):
                     # but how do we handle the case where EOSS is not present (below) without biasing toward those candidates?
                     scores_no_eoss = scores[:-1]
                 else:
-                    if not verbose:
+                    if verbose:
                         print(f"warning: {self.EOSS} not found; completion len {len(completion)}", file=sys.stderr)
                         print("last part:")
                         print(part)
@@ -699,7 +704,8 @@ class CausalMasking(FairseqModel):
                     scores_no_eoss = scores
                     completion = completion + [self.EOSS_ID]
                     generated_all_eoss = False
-                    if self.args.max_infill_attempts > 1:
+                    if attempt_num < self.args.max_infill_attempts:
+                        # we have another attempt remaining
                         break
                 ids.extend(completion)
 
@@ -784,12 +790,18 @@ class OpenAIModel(Model):
             raise NotImplementedError("--prompt_prefix for OpenAIModel")
         self.engine = engine
         self.persistent = persistent
+        # turn off the logging, which prints an HTTP request code for every call to the API 
+        import logging
+        logging.disable(logging.INFO)
+        #logging.basicConfig(level=logging.WARNING)
 
     def encode_stop_words(self, stop_words: List[str]):
         return stop_words
 
     def score_text(self, text_batch: List[str], scoring: str):
         all_scores = []
+        if scoring == 'random':
+            return [random.random() for _ in text_batch]
         for text in text_batch:
             response = self.complete(text, None, max_tokens=0, temperature=1.0, echo=True)
             choice = response['choices'][0]
@@ -842,7 +854,7 @@ class OpenAIModel(Model):
                     **kwargs
                 )
                 succeeded = True
-            except openai.error.RateLimitError as e:
+            except (openai.error.RateLimitError, openai.error.APIError) as e:
                 if not self.persistent:
                     raise e
                 print(e)
