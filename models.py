@@ -361,7 +361,11 @@ class FairseqModel(Model):
             self.lm_model = TransformerLanguageModel.from_pretrained(
                 model_root_dir, model_basename, bpe=bpe, gpt2_encoder_json=gpt2_encoder_json, gpt2_vocab_bpe=gpt2_vocab_bpe
                 ).half()
+            # self.lm_model = TransformerLanguageModel.from_pretrained(
+            #     model_root_dir, model_basename, bpe=bpe, gpt2_encoder_json=gpt2_encoder_json, gpt2_vocab_bpe=gpt2_vocab_bpe
+            #     )
             self.lm_model.eval().cuda() 
+            # self.lm_model.eval()
         else:
             self.lm_model = model
 
@@ -388,7 +392,7 @@ class FairseqModel(Model):
 
     @property
     def _extra_stop_words(self):
-        return ["<| ", "<|/ ", "<code>", "</code>", "<cell>", "</cell>"]
+        return ["<|", "<|/", "<code>", "</code>", "<cell>", "</cell>"]
 
     def _encode(self, text: str, strip_eos=False):
         # -> torch.tensor
@@ -456,19 +460,25 @@ class FairseqModel(Model):
         all_tokens = []
         all_log_probs = []
         while len(all_tokens) < n:
-            completion_tokens, completion_token_log_probs = decoder.decode(
+            this_batch_size = min(self.args.batch_size, n - len(all_tokens))
+            multi_completion_tokens, multi_completion_token_log_probs, multi_completion_lengths = decoder.decode_multiple_candidates(
                 encoded_prompt.to(self.lm_model.device),
-                return_log_probs=True,
+                num_candidates=this_batch_size,
                 encoded_stop_words=encoded_stop_words,
             )
-            # remove initial EOS
-            assert completion_tokens[0].item() == decoder.eos
-            completion_tokens = completion_tokens[1:]
-            completion_token_log_probs = completion_token_log_probs[1:]
-            assert completion_tokens.size() == completion_token_log_probs.size()
-            assert torch.allclose(completion_tokens[:len(encoded_prompt)], encoded_prompt)
-            all_tokens.append(completion_tokens[len(encoded_prompt):])
-            all_log_probs.append(completion_token_log_probs[len(encoded_prompt):])
+            assert multi_completion_tokens.size(0) == multi_completion_token_log_probs.size(0) == multi_completion_lengths.size(0) == this_batch_size
+            for completion_ix in range(this_batch_size):
+                completion_length = multi_completion_lengths[completion_ix].item()
+                completion_tokens = multi_completion_tokens[completion_ix][:completion_length]
+                completion_token_log_probs = multi_completion_token_log_probs[completion_ix][:completion_length]
+                # remove initial EOS
+                assert completion_tokens[0].item() == decoder.eos
+                completion_tokens = completion_tokens[1:]
+                completion_token_log_probs = completion_token_log_probs[1:]
+                assert completion_tokens.size() == completion_token_log_probs.size()
+                assert torch.allclose(completion_tokens[:len(encoded_prompt)], encoded_prompt)
+                all_tokens.append(completion_tokens[len(encoded_prompt):])
+                all_log_probs.append(completion_token_log_probs[len(encoded_prompt):])
         return all_tokens, all_log_probs
 
     def complete(self, prompt: str, stop_words: List[str], sampling=True, max_tokens=DEFAULT_MAX_TOKENS, top_p=0.95, n=1, num_log_probs=1, temperature=0.6, beam=1):

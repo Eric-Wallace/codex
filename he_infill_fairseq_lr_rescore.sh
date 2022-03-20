@@ -22,4 +22,5 @@ python infill_evaluation.py \
   --num_candidates ${num_candidates} \
   --result_base_path ${outdir}/results \
   --prompt_prefix "<| file ext=.py |>" \
+  --max_tokens 40 \
   | tee ${outdir}/log.out

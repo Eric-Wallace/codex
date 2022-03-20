@@ -10,7 +10,6 @@ from fairseq.models.transformer_lm import TransformerLanguageModel
 from typing import Dict, Optional, List
 from tqdm import tqdm
 
-
 def forward_encoder(model, net_input):
     if not hasattr(model, "encoder"):
         return None
@@ -58,7 +57,12 @@ class DecodingBase(nn.Module):
         self.dummy_param = nn.Parameter(torch.empty(0))
         self.show_tqdm = show_tqdm
 
-    def decode(self, prefix: Optional[torch.Tensor] = None, return_log_probs=False, encoded_stop_words: List[List[int]]=None) -> torch.Tensor:
+    def decode_multiple_candidates(self, prefix: torch.Tensor, num_candidates: int = 1, encoded_stop_words: Optional[List[List[int]]] = None):
+        """
+        returns: (tokens, token_logprobs)
+        tokens: (batch_size x max_seq_length) LongTensor
+        token_logprobs: (batch_size x max_seq_length) FloatTensor
+        """
         if encoded_stop_words is None:
             encoded_stop_words = []
         encoded_stop_words = [[self.eos]] + encoded_stop_words
@@ -66,8 +70,6 @@ class DecodingBase(nn.Module):
             assert isinstance(esw, list)
             assert isinstance(esw[0], int)
         with torch.no_grad():
-            if prefix is None:
-                prefix = torch.tensor([self.eos]).to(self.dummy_param.device)
             prefix = prefix.to(self.dummy_param.device)
             assert prefix.ndim == 1 and prefix.size(0) > 0
             if prefix[0] != self.eos:
@@ -84,13 +86,16 @@ class DecodingBase(nn.Module):
             encoder_out = forward_encoder(self.model, {"src_tokens": src_tokens.unsqueeze(
                 0), "src_lengths": src_lengths.unsqueeze(0)})
 
+            if encoder_out is not None:
+                encoder_out = encoder_out.view(num_candidates, -1, -1)
+
             incremental_states = torch.jit.annotate(
                 Dict[str, Dict[str, Optional[torch.Tensor]]],
                 torch.jit.annotate(
                     Dict[str, Dict[str, Optional[torch.Tensor]]], {})
             )
             tokens = (
-                torch.zeros(1, self.max_len)
+                torch.zeros(num_candidates, self.max_len)
                 .to(src_tokens)
                 .long()
                 .fill_(self.pad)
@@ -98,14 +103,18 @@ class DecodingBase(nn.Module):
             tokens[:, :len(prefix)] = prefix
 
             token_log_probs = (
-                torch.zeros(1, self.max_len)
+                torch.zeros(num_candidates, self.max_len)
                 .to(src_tokens)
                 .float()
             )
 
+            seq_lengths = torch.ones(num_candidates).to(src_tokens.device).long()
+
             it = range(1, self.max_len)
             if self.show_tqdm:
                 it = tqdm(it)
+
+            found_stop = torch.zeros(num_candidates).to(src_tokens.device).bool()
 
             for step in it:
                 decoder_out = self.model.decoder.forward(
@@ -115,30 +124,37 @@ class DecodingBase(nn.Module):
                 )
                 logprobs, _ = unpack_decoder_out(
                     self.model, decoder_out, self.temperature)
+                seq_lengths += (~found_stop).long()
                 if step < len(prefix):
                     tokens[:, step] = prefix[step]
                 else:
-                    tokens[:, step] = self.choice(logprobs.squeeze(0))
-                token = tokens.squeeze(0)[step]
-                # print(f"{step} {token}")
-                token_log_probs[:, step] = logprobs.squeeze(0)[token]
-                found_stop = False
-                for esw in encoded_stop_words:
-                    if tokens[:, step+1-len(esw):step+1].squeeze(0).tolist() == esw:
-                        if step < len(prefix):
-                            print(f"warning: stopping on {token.item()} at step {step} within prefix {prefix}")
-                        tokens = tokens[:, :step+1]
-                        token_log_probs = token_log_probs[:, :step+1]
-                        # print(f"breaking on {token.item()}")
-                        # print(logprobs[:4])
-                        found_stop = True
-                        break
-                if found_stop:
+                    for candidate_ix in range(num_candidates):
+                        candidate_lps = logprobs[candidate_ix]
+                        token = self.choice(candidate_lps)
+                        tokens[candidate_ix, step] = token
+                        token_log_probs[candidate_ix, step] = candidate_lps[token]
+                        candidate_found_stop = False
+                        for esw in encoded_stop_words:
+                            if tokens[candidate_ix, step+1-len(esw):step+1].tolist() == esw:
+                                if step < len(prefix):
+                                    print(f"warning: stopping on {token.item()} at step {step} within prefix {prefix}")
+                                candidate_found_stop = True
+                        found_stop[candidate_ix] |= candidate_found_stop
+                if found_stop.all():
+                    tokens = tokens[:, :step+1]
+                    token_log_probs = token_log_probs[:, :step+1]
                     break
-            if return_log_probs:
-                return tokens.squeeze(0), token_log_probs.squeeze(0)
-            else:
-                return tokens.squeeze(0)
+            return tokens, token_log_probs, seq_lengths
+
+
+    def decode(self, prefix: Optional[torch.Tensor] = None, return_log_probs=False, encoded_stop_words: List[List[int]]=None) -> torch.Tensor:
+        if prefix is None:
+            prefix = torch.tensor([self.eos]).to(self.dummy_param.device)
+        tokens, token_log_probs, seq_lengths = self.decode_multiple_candidates(prefix, num_candidates=num_candidates, encoded_stop_words=encoded_stop_words)
+        if return_log_probs:
+            return tokens.squeeze(0), token_log_probs.squeeze(0)
+        else:
+            return tokens.squeeze(0)
 
     def choice(self, logprob: torch.Tensor) -> int:
         raise NotImplementedError
