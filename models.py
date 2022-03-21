@@ -919,7 +919,10 @@ class OpenAIModel(Model):
         assert len(choices) == n
         for choice in choices:
             choice['infills_untruncated'] = [choice['text']]
-            choice['text'] = trunc_params.truncate(choice['text'])
+            truncated = trunc_params.truncate(choice['text'])
+            # api doesn't let us set this to an empty string
+            if len(truncated) > 0:
+                choice['text'] = truncated
         response['choices'] = choices
         return response
 

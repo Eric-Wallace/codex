@@ -32,6 +32,8 @@ class MBPPDataset(object):
             'prompting': list(range(2, 10+1)) + [1],
             'training': list(range(511, 1000+1)),
         }
+        # use a subset of training for validation
+        split_ids['validation'] = split_ids['training'][::4]
         for k1 in split_ids:
             for k2 in split_ids:
                 if k1 == k2:
