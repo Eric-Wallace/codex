@@ -32,13 +32,13 @@ class MBPPDataset(object):
             'prompting': list(range(2, 10+1)) + [1],
             'training': list(range(511, 1000+1)),
         }
-        # use a subset of training for validation
-        split_ids['validation'] = split_ids['training'][::4]
         for k1 in split_ids:
             for k2 in split_ids:
                 if k1 == k2:
                     continue
                 assert len(set(split_ids[k1]) & set(split_ids[k2])) == 0, f"overlap between {k1} and {k2}"
+        # use a subset of training for validation
+        split_ids['validation'] = split_ids['training'][::4]
         def filt(split_name):
             return [d for d in self.data if d['task_id'] in split_ids[split_name]]
         self.data_splits = {
@@ -221,7 +221,7 @@ def make_parser():
 
     parser.add_argument("--k_shot", type=int)
     parser.add_argument("--prompt_template", choices=["google", "comment"], default="comment")
-    parser.add_argument("--split", choices=["evaluation", "prompting", "training"], default="evaluation")
+    parser.add_argument("--split", choices=["evaluation", "prompting", "training", "validation"], default="evaluation")
     parser.add_argument("--n_examples", type=int)
 
     parser.add_argument("--git_status", action="store_true")

@@ -61,7 +61,7 @@ def add_model_args(parser):
     parser.add_argument("--temperature", type=float, default=0.6, help="pass 0.0 to do greedy or beam decoding")
     parser.add_argument("--top_p", type=float, default=0.95, help="nucleus top-p")
     parser.add_argument("--beam", type=int, default=1, help="beam size; only used if --temperature==0.0")
-    parser.add_argument("--batch_size", type=int)
+    parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--prompt_prefix")
     parser.add_argument("--candidate_scoring", choices=["mean", "sum", "random"], default="mean")
     parser.add_argument("--max_tokens", type=int, default=DEFAULT_MAX_TOKENS)
@@ -940,7 +940,7 @@ def make_model(args, cached_model=None):
         if "gpt2tok" in model_name:
             assert tokenizer_name == "gpt2"
         else:
-            assert tokenizer_name == "gpt2_pretokenization_newlines_only"
+            assert tokenizer_name is None or tokenizer_name == "gpt2_pretokenization_newlines_only"
         if 'cm-' in model_name:
             return CausalMasking(args, model_name, prompt_prefix=prompt_prefix, batch_size=args.batch_size, model=cached_model)
         elif 'lm-' in model_name:
