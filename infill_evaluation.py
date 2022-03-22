@@ -95,7 +95,8 @@ def run_systematic_infill(args, model: Model, eval_type="one_line", result_base_
 
                 top_choice = sorted_choices[0]
                 if "infill_attempts" in top_choice:
-                    infill_attempts.append(top_choice["infill_attempts"])
+                    # infill_attempts is a list of len(parts) - 1, i.e. 1 for a single-infilling task
+                    infill_attempts.append(top_choice["infill_attempts"][0])
 
                 infill_result = infilling_problem.copy()
                 

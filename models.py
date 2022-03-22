@@ -457,10 +457,9 @@ class FairseqModel(Model):
                 assert isinstance(esw[0], int)
                 encoded_stop_words.append(esw)
 
-        all_tokens = []
-        all_log_probs = []
-        while len(all_tokens) < n:
-            this_batch_size = min(self.args.batch_size, n - len(all_tokens))
+        num_yielded = 0
+        while num_yielded < n:
+            this_batch_size = min(self.args.batch_size, n - num_yielded)
             multi_completion_tokens, multi_completion_token_log_probs, multi_completion_lengths = decoder.decode_multiple_candidates(
                 encoded_prompt.to(self.lm_model.device),
                 num_candidates=this_batch_size,
@@ -477,9 +476,8 @@ class FairseqModel(Model):
                 completion_token_log_probs = completion_token_log_probs[1:]
                 assert completion_tokens.size() == completion_token_log_probs.size()
                 assert torch.allclose(completion_tokens[:len(encoded_prompt)], encoded_prompt)
-                all_tokens.append(completion_tokens[len(encoded_prompt):])
-                all_log_probs.append(completion_token_log_probs[len(encoded_prompt):])
-        return all_tokens, all_log_probs
+                yield completion_tokens[len(encoded_prompt):], completion_token_log_probs[len(encoded_prompt):]
+                num_yielded += 1
 
     def complete(self, prompt: str, stop_words: List[str], sampling=True, max_tokens=DEFAULT_MAX_TOKENS, top_p=0.95, n=1, num_log_probs=1, temperature=0.6, beam=1):
         ''' This function runs fairseq LM locally but places the outputs into an json that looks just like the one
@@ -504,14 +502,18 @@ class FairseqModel(Model):
         encoded_prompt = self._encode(prompt, strip_eos=True)
         encoded_stop_words = [self._encode(stop_word, strip_eos=True).tolist() for stop_word in stop_words]
 
-        all_tokens, all_log_probs = self._generate(
+        all_tokens = []
+        all_log_probs = []
+        for tokens, log_probs in self._generate(
             encoded_prompt,
             max_tokens=max_tokens,
             top_p=top_p,
             n=n,
             temperature=temperature,
             extra_encoded_stop_words=encoded_stop_words,
-        )
+        ):
+            all_tokens.append(tokens)
+            all_log_probs.append(log_probs)
 
         assert len(all_tokens) == n
         assert len(all_log_probs) == n
@@ -632,6 +634,9 @@ class CausalMasking(FairseqModel):
         assert isinstance(parts, list)
         assert len(parts) > 1
 
+        if not sampling:
+            raise NotImplementedError()
+
         parts_without_prompt_prefix = parts
         if self.prompt_prefix is not None:
             parts = parts.copy()
@@ -655,82 +660,86 @@ class CausalMasking(FairseqModel):
                 if self.extra_sentinel and len(part) > 0:
                     prompt.append(self.sentinel_id(sentinel_ix))
 
-        for attempt_num in range(1, self.args.max_infill_attempts+1):
-            ids = prompt.copy()
-            infills = []
+        ids = prompt.copy()
+        infills = []
 
-            complete = []
+        complete = []
 
-            infill_scores = []
-            infill_tokens = []
+        infill_scores = []
+        infill_tokens = []
 
-            generated_all_eoss = True
+        generated_all_eoss = []
 
-            # autoregressively fill in
-            for sentinel_ix, part in enumerate(parts[:-1]):
-                ids.append(self.sentinel_id(sentinel_ix))
-                model.cfg.generation['max_len_b'] = max_tokens + len(ids)
-                if verbose:
-                    print(part, end="")
-                    print(f"<sentinel:{sentinel_ix}>", end="")
-                with torch.no_grad():
-                    # print("completing: ")
-                    # print(self._decode(ids))
-                    all_tokens, all_log_probs = self._generate(
-                        torch.tensor(ids),
-                        max_tokens=max_tokens,
-                        top_p=top_p,
-                        n=n,
-                        temperature=temperature,
-                        extra_encoded_stop_words=[[self.EOSS_ID]]
-                    )
-                    completion = all_tokens[0].tolist()
-                    scores = all_log_probs[0]
-                    if completion[-1] == 2:
-                        completion = completion[:-1]
-                        scores = scores[:-1]
+        attempt_nums = []
 
-                # TODO: make sure to check that EOS are accounted for in the prefix removal below 
-                # (they may have been added, so len(ids) might not be the right thing to use? maybe 
-                # other stuff too)
-
-                if self.EOSS_ID in completion:
-                    t = completion.index(self.EOSS_ID)+1
-                    completion = completion[:t]
-                    scores = scores[:t]
-                    # TODO: handle this better: we do want to include the score for EOSS (if we use these scores somewhere)
-                    # but how do we handle the case where EOSS is not present (below) without biasing toward those candidates?
-                    scores_no_eoss = scores[:-1]
-                else:
-                    if verbose:
-                        print(f"warning: {self.EOSS} not found; completion len {len(completion)}", file=sys.stderr)
-                        print("last part:")
-                        print(part)
-                        print("next part:")
-                        print(parts[sentinel_ix+1])
-                        print("completion")
-                        print(completion)
-                        print(self._decode(completion))
-                    scores_no_eoss = scores
-                    completion = completion + [self.EOSS_ID]
-                    generated_all_eoss = False
-                    if attempt_num < self.args.max_infill_attempts:
-                        # we have another attempt remaining
+        # autoregressively fill in
+        for sentinel_ix, part in enumerate(parts[:-1]):
+            ids.append(self.sentinel_id(sentinel_ix))
+            model.cfg.generation['max_len_b'] = max_tokens + len(ids)
+            if verbose:
+                print(part, end="")
+                print(f"<sentinel:{sentinel_ix}>", end="")
+            with torch.no_grad():
+                # print("completing: ")
+                # print(self._decode(ids))
+                attempt_num = 0
+                generated_eoss = False
+                for completion, scores in self._generate(
+                    torch.tensor(ids),
+                    max_tokens=max_tokens,
+                    top_p=top_p,
+                    n=self.args.max_infill_attempts,
+                    temperature=temperature,
+                    extra_encoded_stop_words=[[self.EOSS_ID]]
+                ):
+                    attempt_num += 1
+                    completion = completion.tolist()
+                    # allow ourselves up to max_infill_attempts to find a sequence ending in EOSS_ID
+                    if self.EOSS_ID in completion:
+                        generated_eoss = True
                         break
-                ids.extend(completion)
+                if completion[-1] == 2:
+                    completion = completion[:-1]
+                    scores = scores[:-1]
 
-                completion_no_eoss = completion[:-1]
+            attempt_nums.append(attempt_num)
+            generated_all_eoss.append(generated_eoss)
 
-                infill_tokens.append(completion_no_eoss)
-                infill_scores.append(scores_no_eoss)
+            # TODO: make sure to check that EOS are accounted for in the prefix removal below 
+            # (they may have been added, so len(ids) might not be the right thing to use? maybe 
+            # other stuff too)
 
-                decoded = self._decode(completion_no_eoss)
-                complete.append(parts_without_prompt_prefix[sentinel_ix])
-                complete.append(decoded)
-                infills.append(decoded)
-            if generated_all_eoss:
-                # don't need to retry
-                break
+            if self.EOSS_ID in completion:
+                t = completion.index(self.EOSS_ID)+1
+                completion = completion[:t]
+                scores = scores[:t]
+                # TODO: handle this better: we do want to include the score for EOSS (if we use these scores somewhere)
+                # but how do we handle the case where EOSS is not present (below) without biasing toward those candidates?
+                scores_no_eoss = scores[:-1]
+            else:
+                if verbose:
+                    print(f"warning: {self.EOSS} not found; completion len {len(completion)}", file=sys.stderr)
+                    print("last part:")
+                    print(part)
+                    print("next part:")
+                    print(parts[sentinel_ix+1])
+                    print("completion")
+                    print(completion)
+                    print(self._decode(completion))
+                scores_no_eoss = scores
+                completion = completion + [self.EOSS_ID]
+                generated_all_eoss = False
+            ids.extend(completion)
+
+            completion_no_eoss = completion[:-1]
+
+            infill_tokens.append(completion_no_eoss)
+            infill_scores.append(scores_no_eoss)
+
+            decoded = self._decode(completion_no_eoss)
+            complete.append(parts_without_prompt_prefix[sentinel_ix])
+            complete.append(decoded)
+            infills.append(decoded)
 
         complete.append(parts[-1])
 
@@ -738,7 +747,7 @@ class CausalMasking(FairseqModel):
             'complete': complete,
             'infills_untruncated': infills,
             'ids': ids,
-            'infill_attempts': attempt_num,
+            'infill_attempts': attempt_nums,
             'generated_all_eoss': generated_all_eoss,
             # 'raw': self._decode(ids),
             'logprobs': {
