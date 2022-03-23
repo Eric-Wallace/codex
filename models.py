@@ -2,7 +2,7 @@ import os
 import time
 from unicodedata import bidirectional
 import numpy as np
-from typing import List
+from typing import List, Optional
 import random
 import sys
 import argparse
@@ -141,7 +141,7 @@ class Model:
         sorted_choices = self._rank_helper(response['choices'], scoring=scoring)
         return sorted_choices, response
 
-    def rank_infills(self, parts: List[str], verbose=False, bidirectional_scoring=False, bidirectional_generation=False,
+    def rank_infills(self, parts: List[str], stop_words: Optional[List[str]]=None, verbose=False, bidirectional_scoring=False, bidirectional_generation=False,
                     cached_response=None, scoring='mean',
                     truncation_parameters: List[TruncationParameters] = None,
                     sampling=True, temperature=0.6, top_p=0.95, n=1, max_tokens=DEFAULT_MAX_TOKENS, beam=1):
@@ -161,6 +161,7 @@ class Model:
             if bidirectional_generation:
                 response = self.infill(
                     [prefix, suffix],
+                    stop_words=stop_words,
                     # can pass None for this since we will truncate afterward
                     truncation_parameters=None,
                     verbose=verbose,
@@ -172,7 +173,7 @@ class Model:
                     beam=beam
                 )
             else:
-                response = self.complete(prefix, stop_words=[], sampling=sampling, temperature=temperature, top_p=top_p, n=n, max_tokens=max_tokens, beam=beam)
+                response = self.complete(prefix, stop_words=stop_words, sampling=sampling, temperature=temperature, top_p=top_p, n=n, max_tokens=max_tokens, beam=beam)
         else:
             response = cached_response
 
@@ -479,6 +480,31 @@ class FairseqModel(Model):
                 yield completion_tokens[len(encoded_prompt):], completion_token_log_probs[len(encoded_prompt):]
                 num_yielded += 1
 
+    def _truncate_at_stop_words(self, stop_words, sequence_ids, logprobs, show_warnings=True):
+        # search for stopwords, to truncate after them
+        full_seq_decoded = self._decode(sequence_ids)
+        min_index = None
+        for stop_word in stop_words:
+            index = full_seq_decoded.find(stop_word)
+            if index < 0:
+                continue
+            if min_index is None or index < min_index:
+                min_index = index
+        
+        if min_index is not None:
+            # if you we find one of the stopwords, then we delete everything from the stopword on
+            seq_decoded = full_seq_decoded[:min_index]
+            # figure out how many tokens to take from log probs by reencoding the truncated string
+            # TODO: this may not exactly be right since this I don't think BPE is a prefix code
+            seq = self._encode(seq_decoded, strip_eos=True)
+            logprobs = logprobs[:len(seq)]
+        else:
+            if show_warnings:
+                print('no stopword found!') # not having any stopword found is probably a very bad sign
+            seq = sequence_ids
+            seq_decoded = full_seq_decoded
+        return seq, seq_decoded, logprobs
+
     def complete(self, prompt: str, stop_words: List[str], sampling=True, max_tokens=DEFAULT_MAX_TOKENS, top_p=0.95, n=1, num_log_probs=1, temperature=0.6, beam=1):
         ''' This function runs fairseq LM locally but places the outputs into an json that looks just like the one
         provided by the OpenAI API. '''
@@ -529,27 +555,7 @@ class FairseqModel(Model):
             full_logprobs = all_log_probs[completion_ix]
             assert len(full_seq) == len(full_logprobs)
 
-            # search for stopwords, to truncate after them
-            full_seq_decoded = self._decode(full_seq)
-            min_index = None
-            for stop_word in stop_words:
-                index = full_seq_decoded.find(stop_word)
-                if index < 0:
-                    continue
-                if min_index is None or index < min_index:
-                    min_index = index
-            
-            if index is not None:
-                # if you we find one of the stopwords, then we delete everything from the stopword on
-                seq_decoded = full_seq_decoded[:min_index]
-                # figure out how many tokens to take from log probs by reencoding the truncated string
-                # TODO: this may not exactly be right since this I don't think BPE is a prefix code
-                seq = self._encode(seq_decoded, strip_eos=True)
-                logprobs = full_logprobs[:len(seq)]
-            else:
-                print('no stopword found!') # not having any stopword found is probably a very bad sign
-                seq = full_seq
-                seq_decoded = full_seq_decoded
+            seq, seq_decoded, logprobs = self._truncate_at_stop_words(stop_words, full_seq, full_logprobs, show_warnings=True)
 
             curr_json['text'] = seq_decoded
         
@@ -621,7 +627,7 @@ class CausalMasking(FairseqModel):
         #         break
         return self.tokenizer.decode((token_ids_offset).tolist(), skip_special_tokens=False)
 
-    def infill(self, parts: List[str], verbose=False, n=1, truncation_parameters: List[TruncationParameters]=None, sampling=True, max_tokens=DEFAULT_MAX_TOKENS, top_p=0.95, temperature=0.0, beam=1):
+    def infill(self, parts: List[str], stop_words: Optional[List[str]]=None, verbose=False, n=1, truncation_parameters: List[TruncationParameters]=None, sampling=True, max_tokens=DEFAULT_MAX_TOKENS, top_p=0.95, temperature=0.0, beam=1):
         # Force the model to fill in code in between each string in parts
         # see code_to_docstring and docstring_to_code for example usages
         if truncation_parameters is None:
@@ -636,6 +642,12 @@ class CausalMasking(FairseqModel):
 
         if not sampling:
             raise NotImplementedError()
+        
+        if n != 1:
+            raise NotImplementedError()
+
+        if beam != 1:
+            raise NotImplementedError()
 
         parts_without_prompt_prefix = parts
         if self.prompt_prefix is not None:
@@ -645,9 +657,13 @@ class CausalMasking(FairseqModel):
         infills = []
 
         prompt = []
-        
-        if n != 1:
-            raise NotImplementedError()
+
+        if stop_words is None:
+            stop_words = []
+
+        stop_words = stop_words + self._extra_stop_words
+        encoded_stop_words = [self._encode(stop_word, strip_eos=True).tolist() for stop_word in stop_words]
+        encoded_stop_words.append([self.EOSS_ID])
 
         # encode parts separated by sentinel
         for sentinel_ix, part in enumerate(parts):
@@ -690,7 +706,7 @@ class CausalMasking(FairseqModel):
                     top_p=top_p,
                     n=self.args.max_infill_attempts,
                     temperature=temperature,
-                    extra_encoded_stop_words=[[self.EOSS_ID]]
+                    extra_encoded_stop_words=encoded_stop_words,
                 ):
                     attempt_num += 1
                     completion = completion.tolist()
@@ -733,13 +749,14 @@ class CausalMasking(FairseqModel):
 
             completion_no_eoss = completion[:-1]
 
-            infill_tokens.append(completion_no_eoss)
-            infill_scores.append(scores_no_eoss)
+            completion_no_stopwords, completion_no_stopwords_decoded, scores_no_stopwords = self._truncate_at_stop_words(stop_words, completion_no_eoss, scores_no_eoss, show_warnings=False)
 
-            decoded = self._decode(completion_no_eoss)
+            infill_tokens.append(completion_no_stopwords)
+            infill_scores.append(scores_no_stopwords)
+
             complete.append(parts_without_prompt_prefix[sentinel_ix])
-            complete.append(decoded)
-            infills.append(decoded)
+            complete.append(completion_no_stopwords_decoded)
+            infills.append(completion_no_stopwords_decoded)
 
         complete.append(parts[-1])
 
@@ -887,7 +904,8 @@ class OpenAIModel(Model):
             **kwargs
         )
 
-    def infill(self, parts: List[str], verbose=False, n=1, truncation_parameters: List[TruncationParameters]=None, sampling=True, max_tokens=DEFAULT_MAX_TOKENS, top_p=0.95, temperature=0.0, beam=1, **kwargs):
+    def infill(self, parts: List[str], stop_words:Optional[List[str]]=None, verbose=False, n=1, truncation_parameters: List[TruncationParameters]=None, sampling=True, max_tokens=DEFAULT_MAX_TOKENS, top_p=0.95, temperature=0.0, beam=1, **kwargs):
+        # inclusive_stop_words: include these in the returned value
         stop_words = None
         if not sampling:
             raise NotImplementedError()

@@ -21,9 +21,11 @@ def run_codexglue_code_to_text(args, model: Model, result_base_path=None):
     if result_base_path is not None:
         result_txt_fname = f"{result_base_path}.txt"
         result_pkl_fname = f"{result_base_path}.pkl"
+        response_pkl_fname = f"{result_base_path}_responses.pkl"
     else:
         result_txt_fname = "codexglue_code_to_text.txt"
         result_pkl_fname = "codexglue_code_to_text.pkl"
+        response_pkl_fname = "codexglue_code_to_text_responses.pkl"
     if args.resume:
         start = sum(1 for line in open(result_txt_fname))
         print(f"==== Resuming from line {start} of {result_txt_fname} ====")
@@ -34,6 +36,8 @@ def run_codexglue_code_to_text(args, model: Model, result_base_path=None):
         result_txt = open(result_txt_fname, "w")
 
     all_results = []
+
+    responses = {}
 
     with tqdm.tqdm(problem_iterator, ncols=120) as pbar:
         for i, problem in enumerate(pbar):
@@ -49,11 +53,13 @@ def run_codexglue_code_to_text(args, model: Model, result_base_path=None):
                     bidirectional_generation=args.bidirectional_generation, bidirectional_scoring=args.bidirectional_scoring,
                     truncation_parameters=truncation_parameters,
                     scoring=args.candidate_scoring,
+                    stop_words=['"""', '    """'] # these are both their own tokens
                 )
                 if args.max_tokens is not None:
                     kwargs['max_tokens'] = args.max_tokens
                 kwargs.update(sampling=True, top_p=args.top_p, temperature=args.temperature, beam=args.beam)
                 sorted_choices, response = model.rank_infills(prompt_parts, **kwargs)
+                responses[i] = response
                 top_choice = sorted_choices[0]
 
                 infill_result = problem.copy()
@@ -78,6 +84,9 @@ def run_codexglue_code_to_text(args, model: Model, result_base_path=None):
     #  incomplete if we're resuming
     with open(result_pkl_fname, "wb") as f:
         pickle.dump(all_results, f)
+
+    with open(responses, "wb") as f:
+        pickle.dump(responses, f)
 
     result_txt.close()
 
