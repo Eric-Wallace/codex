@@ -18,14 +18,25 @@ def run_codexglue_code_to_text(args, model: Model, result_base_path=None):
         "prompt_parts": build_docstring_infill_prompt(d["original_string"], docstring_text=d["docstring"])
     } for d in data]
 
-    if result_base_path is not None:
-        result_txt_fname = f"{result_base_path}.txt"
-        result_pkl_fname = f"{result_base_path}.pkl"
-        response_pkl_fname = f"{result_base_path}_responses.pkl"
+    if args.shard_number is not None:
+        assert 0 <= args.shard_number < args.num_shards
+        shard_string = f"_shard-{args.shard_number}-of-{args.num_shards}"
+        shard_size = len(problem_iterator) // args.num_shards
+        shard_start = shard_size * args.shard_number
+        shard_end = shard_start + shard_size
+        print(f"sharding to only process instances [{shard_start}, {shard_end})")
+        problem_iterator = problem_iterator[shard_start:shard_end]
     else:
-        result_txt_fname = "codexglue_code_to_text.txt"
-        result_pkl_fname = "codexglue_code_to_text.pkl"
-        response_pkl_fname = "codexglue_code_to_text_responses.pkl"
+        shard_string = ""
+
+    if result_base_path is not None:
+        result_txt_fname = f"{result_base_path}{shard_string}.txt"
+        result_pkl_fname = f"{result_base_path}{shard_string}.pkl"
+        response_pkl_fname = f"{result_base_path}_responses{shard_string}.pkl"
+    else:
+        result_txt_fname = f"codexglue_code_to_text{shard_string}.txt"
+        result_pkl_fname = f"codexglue_code_to_text{shard_string}.pkl"
+        response_pkl_fname = f"codexglue_code_to_text_responses{shard_string}.pkl"
     if args.resume:
         start = sum(1 for line in open(result_txt_fname))
         print(f"==== Resuming from line {start} of {result_txt_fname} ====")
@@ -85,7 +96,7 @@ def run_codexglue_code_to_text(args, model: Model, result_base_path=None):
     with open(result_pkl_fname, "wb") as f:
         pickle.dump(all_results, f)
 
-    with open(responses, "wb") as f:
+    with open(response_pkl_fname, "wb") as f:
         pickle.dump(responses, f)
 
     result_txt.close()
@@ -98,6 +109,9 @@ def make_parser():
     parser.add_argument("--result_base_path")
     parser.add_argument("--git_status", action="store_true")
     parser.add_argument("--resume", action="store_true")
+
+    parser.add_argument("--num_shards", type=int, default=10)
+    parser.add_argument("--shard_number", type=int)
 
     return parser
 
