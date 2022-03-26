@@ -10,8 +10,9 @@ from typing import Set
 import pprint
 from collections import Counter
 import pickle
+import pprint
 
-from models import Model, TruncationParameters
+from models import Model, TruncationParameters, add_model_args, add_infilling_args, make_model
 
 from type_hints import create_return_example, normalize_type
 
@@ -219,7 +220,9 @@ def run_return_prediction(args, examples, model: Model, result_base_path=None):
             infill_result["complete"] = top_choice["complete"]
             infill_result["prediction_untruncated"] = top_choice["infills_untruncated"][0]
 
-            pbar.set_postfix({"output": infill_result["text"]})
+            verbose_output = f"{problem['true_type']} : {infill_result['predicted_type']}"
+
+            pbar.set_postfix({"output": verbose_output})
 
             all_results.append(infill_result)
 
@@ -293,11 +296,17 @@ def evaluate(results, verbose=False, type_from_source=True):
 def make_parser():
     import argparse
     parser = argparse.ArgumentParser()
+
+    add_model_args(parser)
+    add_infilling_args(parser)
+
     parser.add_argument("example_filename")
     parser.add_argument("--typewriter_dir", default="/private/home/dpf/data/TypeWriter_dataset")
     parser.add_argument("--crawl_root", default="/checkpoint/dpf/data/typewriter/crawl/data")
     parser.add_argument("--git_status", action="store_true")
     parser.add_argument("--generate_examples", action="store_true")
+    parser.add_argument("--result_base_path")
+    parser.add_argument("--num_examples", type=int)
     return parser
 
 if __name__ == "__main__":
@@ -310,13 +319,19 @@ if __name__ == "__main__":
         dump_version_info()
 
     split = 'validation'
-    decontaminate = True
     imports_and_function_only = True
 
     if args.generate_examples:
-        examples = build_examples(args.typewriter_dir, args.crawl_root, decontaminate, imports_and_function_only, split, show_tqdm=True)
+        examples = build_examples(args.typewriter_dir, args.crawl_root, imports_and_function_only, split, show_tqdm=True)
         with open(args.example_filename, 'w') as f:
             json.dump(examples, f, indent=4)
     else:
         with open(args.example_filename, 'r') as f:
             examples = json.load(f)
+        
+        if args.num_examples:
+            examples = examples[:args.num_examples]
+        model = make_model(args)
+
+        results = run_return_prediction(args, examples, model, result_base_path=args.result_base_path)
+        pprint.pprint(evaluate(results, type_from_source=True))

@@ -20,7 +20,7 @@ DEFAULT_MAX_TOKENS = 450
 CODEX_RETRY_DELAY_SECONDS = 60
 CODEX_MAX_RETRIES = 30
 
-_TruncationParameters = namedtuple("_TruncationParameters", ["max_num_lines", "suffix", "is_docstring_infill", "stop_tokens"])
+_TruncationParameters = namedtuple("_TruncationParameters", ["max_num_lines", "suffix", "is_docstring_infill", "stop_words"])
 class TruncationParameters(_TruncationParameters):
     SUFFIX_NUM_CONSECUTIVE_LINES = 2
 
@@ -55,9 +55,9 @@ class TruncationParameters(_TruncationParameters):
             infill_truncated = truncate_num_lines(infill_truncated, max_num_lines=self.max_num_lines)
         if self.is_docstring_infill:
             infill_truncated = truncate_docstring_infill(infill_truncated)
-        if self.stop_tokens is not None:
+        if self.stop_words is not None:
             stop_index = None
-            for stop_token in self.stop_tokens:
+            for stop_token in self.stop_words:
                 if stop_token in infill_truncated:
                     index = infill_truncated.index(stop_token)
                     if stop_index is None or index < stop_index:
