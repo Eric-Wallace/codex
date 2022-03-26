@@ -183,12 +183,23 @@ def run_return_prediction(args, examples, model: Model, result_base_path=None):
     all_results = []
     responses = {}
 
-    if result_base_path is not None:
-        result_pkl_fname = f"{result_base_path}.pkl"
-        response_pkl_fname = f"{result_base_path}_responses.pkl"
+    if args.shard_number is not None and args.shard_number >= 0:
+        assert 0 <= args.shard_number < args.num_shards
+        shard_string = f"_shard-{args.shard_number}-of-{args.num_shards}"
+        shard_size = (len(examples) // args.num_shards) + 1
+        shard_start = shard_size * args.shard_number
+        shard_end = min(shard_start + shard_size, len(examples))
+        print(f"sharding to only process instances [{shard_start}, {shard_end})")
+        # problem_iterator = problem_iterator[shard_start:shard_end]
     else:
-        result_pkl_fname = f"typewriter.pkl"
-        response_pkl_fname = f"typewriter.pkl"
+        shard_string = ""
+
+    if result_base_path is not None:
+        result_pkl_fname = f"{result_base_path}{shard_string}.pkl"
+        response_pkl_fname = f"{result_base_path}{shard_string}_responses.pkl"
+    else:
+        result_pkl_fname = f"typewriter{shard_string}.pkl"
+        response_pkl_fname = f"typewriter{shard_string}.pkl"
 
     with tqdm.tqdm(examples, ncols=120) as pbar:
         for i, problem in enumerate(pbar):
@@ -196,6 +207,8 @@ def run_return_prediction(args, examples, model: Model, result_base_path=None):
             # if we're doing bidirectional_generation with our CM model
             left = "\n".join(problem["extra_left"]) + problem["left"]
             right = problem["right"]
+            if right.startswith(":"):
+                right = right[1:]
             prompt_parts = [left, right]
             stop_words = [':']
             truncation_parameters = [
@@ -220,7 +233,7 @@ def run_return_prediction(args, examples, model: Model, result_base_path=None):
             infill_result["complete"] = top_choice["complete"]
             infill_result["prediction_untruncated"] = top_choice["infills_untruncated"][0]
 
-            verbose_output = f"{problem['true_type']} : {infill_result['predicted_type']}"
+            verbose_output = f"{problem['return_type_from_source']} : {infill_result['predicted_type']}"
 
             pbar.set_postfix({"output": verbose_output})
 
@@ -307,6 +320,10 @@ def make_parser():
     parser.add_argument("--generate_examples", action="store_true")
     parser.add_argument("--result_base_path")
     parser.add_argument("--num_examples", type=int)
+
+    parser.add_argument("--num_shards", type=int, default=10)
+    parser.add_argument("--shard_number", type=int, default=-1)
+
     return parser
 
 if __name__ == "__main__":

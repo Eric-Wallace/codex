@@ -116,7 +116,12 @@ def derive_prefix_suffix(original_source: str, removed_value: str):
 def normalize_type(type_, requires_parse=True) -> str:
     # type_: str if requires_parse; else AST
     if requires_parse:
-        parsed = ast.parse(type_)
+        try:
+            parsed = ast.parse(type_)
+        except Exception as e:
+            print(f"could not parse type {type_}")
+            print(e)
+            return None
     else:
         parsed = type_
     return astunparse.unparse(parsed).strip()
