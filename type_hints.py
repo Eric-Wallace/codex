@@ -1,11 +1,10 @@
-""" author: Armen Aghajanyan """
+""" original author: Armen Aghajanyan """
 from copy import deepcopy
 from operator import index
 from os import remove
 import astunparse
 import ast
-
-from pprint import pprint
+from typing import Optional
 
 class TypeHintKeepOnlyTargeted(ast.NodeTransformer):
     def __init__(self, arg_types, matching_function, remove_type_imports=False):
@@ -51,10 +50,6 @@ class TypeHintKeepOnlyTargeted(ast.NodeTransformer):
         if self.remove_type_imports and node.module == 'typing':
             return None
         return node
-
-def keep_only_return(source, target_line_number, ):
-    # TODO: here
-    pass
 
 
 class TypeHintRemover(ast.NodeTransformer):
@@ -118,17 +113,35 @@ def derive_prefix_suffix(original_source: str, removed_value: str):
         yield original_source[:index], original_source[index + len(removed_value):]
         index = original_source.find(removed_value, index + 1)
 
+def normalize_type(type_, requires_parse=True) -> str:
+    # type_: str if requires_parse; else AST
+    if requires_parse:
+        parsed = ast.parse(type_)
+    else:
+        parsed = type_
+    return astunparse.unparse(parsed).strip()
 
-def create_return_example(source: str, lineno: int, return_type: str, imports_and_function=True):
-    def match_with_type(function, returns):
-        return astunparse.unparse(returns).strip() == return_type
+def create_return_example(source: str, lineno: int, return_type: Optional[str], imports_and_function=True):
+    # pass None for return_type if the type is unknown to not require a type match (@@UNK@@ in the typewriter data)
     def match_with_line_and_type(function, returns):
-        return match_with_type(function, returns) and lineno == function.lineno
+        matches_type = (return_type is None) or normalize_type(returns, requires_parse=True) == normalize_type(return_type, requires_parse=True)
+        matches_line = lineno == function.lineno
+        # if return_type is None:
+        #     print(lineno, function.lineno, astunparse.unparse(returns).strip(), matches_type, matches_line)
+        # if matches_type:
+        #     print(f"match type at line {lineno}, {function.lineno}, {returns.lineno};\t{matches_line}")
+        return matches_type and matches_line
     processor = TypeHintKeepOnlyTargeted(['return'], match_with_line_and_type)
     parsed_source = ast.parse(source)
     # remove the type annotations, except for the target
     processor.visit(parsed_source)
-    assert len(processor.matches) == 1
+    if len(processor.matches) != 1:
+        # print(f"{len(processor.matches)} matches found!")
+        # print(f"return_type: {return_type}")
+        # print('\n'.join(source.splitlines()[lineno-5:lineno+5]))
+        return None
+
+    return_type_from_source = normalize_type(processor.matches[0]['returns'], requires_parse=False)
     
     if imports_and_function:
         extra_left = [astunparse.unparse(node).strip() for node in processor.imports]
@@ -136,14 +149,16 @@ def create_return_example(source: str, lineno: int, return_type: str, imports_an
     else:
         extra_left = []
         to_split = astunparse.unparse(parsed_source)
-    pairs = list(derive_prefix_suffix(to_split, f" -> {return_type}"))
+    pairs = list(derive_prefix_suffix(to_split, f" -> {return_type_from_source}"))
+    if len(pairs) != 1:
+        return None
     assert len(pairs) == 1
     left, right = pairs[0]
     return {
         'extra_left': extra_left,
         'left': left + ' -> ',
         'right': right,
-        'return_type': return_type,
+        'return_type': return_type_from_source,
     }
 
 
@@ -185,4 +200,3 @@ def foo(bar: Dict[T, List[T]],
             infills.append((left,right,removed_value))
         print()
     #pprint(infills)
-
