@@ -20,15 +20,15 @@ DEFAULT_MAX_TOKENS = 450
 CODEX_RETRY_DELAY_SECONDS = 60
 CODEX_MAX_RETRIES = 30
 
-_TruncationParameters = namedtuple("_TruncationParameters", ["max_num_lines", "suffix", "is_docstring_infill"])
+_TruncationParameters = namedtuple("_TruncationParameters", ["max_num_lines", "suffix", "is_docstring_infill", "stop_tokens"])
 class TruncationParameters(_TruncationParameters):
     SUFFIX_NUM_CONSECUTIVE_LINES = 2
 
-    HEURISTICS = ["num_lines", "suffix", "comment"]
+    HEURISTICS = ["num_lines", "suffix", "comment", "stop_words"]
 
     @staticmethod
-    def from_heuristics(truncation_heuristics: List[str], missing_lines: str = None, suffix: str = None):
-        tp = TruncationParameters(None, None, False)
+    def from_heuristics(truncation_heuristics: List[str], missing_lines: str = None, suffix: str = None, stop_words=None):
+        tp = TruncationParameters(None, None, False, None)
         for heuristic in truncation_heuristics:
             assert heuristic in TruncationParameters.HEURISTICS
             if heuristic == "num_lines":
@@ -38,6 +38,8 @@ class TruncationParameters(_TruncationParameters):
                 tp = tp._replace(suffix=suffix)
             elif heuristic == "comment":
                 tp = tp._replace(is_docstring_infill=True)
+            elif heuristic == "stop_words":
+                tp = tp._replace(stop_words=stop_words)
             else:
                 raise NotImplementedError(f"heuristic {heuristic}")
         return tp
@@ -53,6 +55,15 @@ class TruncationParameters(_TruncationParameters):
             infill_truncated = truncate_num_lines(infill_truncated, max_num_lines=self.max_num_lines)
         if self.is_docstring_infill:
             infill_truncated = truncate_docstring_infill(infill_truncated)
+        if self.stop_tokens is not None:
+            stop_index = None
+            for stop_token in self.stop_tokens:
+                if stop_token in infill_truncated:
+                    index = infill_truncated.index(stop_token)
+                    if stop_index is None or index < stop_index:
+                        stop_index = index
+            if stop_index is not None:
+                infill_truncated = infill_truncated[:stop_index]
         return infill_truncated
 
 def add_model_args(parser):
@@ -146,7 +157,7 @@ class Model:
                     truncation_parameters: List[TruncationParameters] = None,
                     sampling=True, temperature=0.6, top_p=0.95, n=1, max_tokens=DEFAULT_MAX_TOKENS, beam=1):
         if truncation_parameters is None:
-            truncation_parameters = [TruncationParameters(None, None, False) for _ in parts[:-1]]
+            truncation_parameters = [TruncationParameters(None, None, False, None) for _ in parts[:-1]]
         assert len(truncation_parameters) == len(parts) - 1
 
         if len(parts) != 2:
@@ -631,7 +642,7 @@ class CausalMasking(FairseqModel):
         # Force the model to fill in code in between each string in parts
         # see code_to_docstring and docstring_to_code for example usages
         if truncation_parameters is None:
-            truncation_parameters = [TruncationParameters(None, None, False) for _ in parts[:-1]]
+            truncation_parameters = [TruncationParameters(None, None, False, None) for _ in parts[:-1]]
         else:
             raise NotImplementedError("truncation_parameters for infill()")
         
@@ -915,7 +926,7 @@ class OpenAIModel(Model):
         if len(parts) != 2:
             raise NotImplementedError("can't infill more than 2 parts")
         if truncation_parameters is None:
-            trunc_params = TruncationParameters(None, None, False)
+            trunc_params = TruncationParameters(None, None, False, None)
         else:
             assert len(truncation_parameters) == 1
             trunc_params = truncation_parameters[0]

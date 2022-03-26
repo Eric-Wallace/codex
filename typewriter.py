@@ -9,8 +9,11 @@ import tqdm
 from typing import Set
 import pprint
 from collections import Counter
+import pickle
 
-from type_hints import create_return_example
+from models import Model, TruncationParameters
+
+from type_hints import create_return_example, normalize_type
 
 import zstandard as zstd
 
@@ -76,7 +79,7 @@ def read_prediction_file(typewriter_dir, argument=False):
             'path': path,
             'line_number': line_num,
             'true_type': gold,
-            'predicted_types': predicted
+            'typewriter_predicted_types': predicted
         }
         if argument:
             record['variable'] = var
@@ -126,13 +129,11 @@ def read_source_files(crawl_root, repos: Set[str], repo_to_paths, repo_to_name):
         repos.remove(repo)
     return repo_to_archive
 
-def build_examples(typewriter_dir: str, crawl_root: str, decontaminate: bool, imports_and_function_only: bool, split: str = 'validation', show_tqdm=False):
+def build_examples(typewriter_dir: str, crawl_root: str, imports_and_function_only: bool, split: str = 'validation', show_tqdm=False):
     repo_to_commit, repo_to_name, repo_to_paths = read_typewriter_data(typewriter_dir, split=split)
 
     repos = set(repo_to_paths.keys())
-
-    if decontaminate:
-        repos = remove_crawled_repos(repos)
+    repos = remove_crawled_repos(repos)
 
     repo_to_archive = read_source_files(crawl_root, repos, repo_to_paths, repo_to_name)
 
@@ -151,19 +152,23 @@ def build_examples(typewriter_dir: str, crawl_root: str, decontaminate: bool, im
         path = record['path']
         lineno = record['line_number']
         true_type = record['true_type']
-        predicted_types = record['predicted_types']
+        predicted_types = record['typewriter_predicted_types']
         if repo not in repos:
             skip_reasons['no repo'] += 1
             continue
         archive = repo_to_archive[repo]
         matching_files = [f for f in archive['file_data'] if f['path'] == path]
         if len(matching_files) != 1:
-            print(f"found {len(matching_files)} for {repo}, {path}")
+            # print(f"found {len(matching_files)} for {repo}, {path}")
             skip_reasons[f"file mismatch {len(matching_files)}"] += 1
             continue
         source = matching_files[0]['content']
         ex = create_return_example(source, lineno, true_type, imports_and_function_only)
         if ex is not None:
+            ex['true_type'] = record['true_type']
+            if ex['true_type'] != None and normalize_type(ex['true_type']) != normalize_type(ex['return_type_from_source']):
+                raise Exception(f"type mismatch: {normalize_type(ex['true_type'])} != {normalize_type(ex['return_type_from_source'])}")
+            ex['typewriter_predicted_types'] = predicted_types
             return_examples.append(ex)
         else:
             skip_reasons["no ast match"] += 1
@@ -173,12 +178,126 @@ def build_examples(typewriter_dir: str, crawl_root: str, decontaminate: bool, im
     print(f"return: skipped {sum(skip_reasons.values())} / {len(result_predictions)} examples ({len(return_examples)} remaining)")
     return return_examples
 
+def run_return_prediction(args, examples, model: Model, result_base_path=None):
+    all_results = []
+    responses = {}
+
+    if result_base_path is not None:
+        result_pkl_fname = f"{result_base_path}.pkl"
+        response_pkl_fname = f"{result_base_path}_responses.pkl"
+    else:
+        result_pkl_fname = f"typewriter.pkl"
+        response_pkl_fname = f"typewriter.pkl"
+
+    with tqdm.tqdm(examples, ncols=120) as pbar:
+        for i, problem in enumerate(pbar):
+            # TODO: could add extra sentinels here to take the place of omitted code, 
+            # if we're doing bidirectional_generation with our CM model
+            left = "\n".join(problem["extra_left"]) + problem["left"]
+            right = problem["right"]
+            prompt_parts = [left, right]
+            stop_words = [':']
+            truncation_parameters = [
+                    TruncationParameters.from_heuristics(["stop_words"], stop_words=stop_words)
+                ]
+            kwargs = dict(
+                verbose=False, n=args.num_candidates,
+                bidirectional_generation=args.bidirectional_generation, bidirectional_scoring=args.bidirectional_scoring,
+                truncation_parameters=truncation_parameters,
+                scoring=args.candidate_scoring,
+                stop_words=stop_words,
+            )
+            if args.max_tokens is not None:
+                kwargs['max_tokens'] = args.max_tokens
+            kwargs.update(sampling=True, top_p=args.top_p, temperature=args.temperature, beam=args.beam)
+            sorted_choices, response = model.rank_infills(prompt_parts, **kwargs)
+            responses[i] = response
+            top_choice = sorted_choices[0]
+
+            infill_result = problem.copy()
+            infill_result["predicted_type"] = top_choice["infills"][0]
+            infill_result["complete"] = top_choice["complete"]
+            infill_result["prediction_untruncated"] = top_choice["infills_untruncated"][0]
+
+            pbar.set_postfix({"output": infill_result["text"]})
+
+            all_results.append(infill_result)
+
+    # Note: since we don't save until the end of the run, these results are
+    #  incomplete if we're resuming
+    with open(result_pkl_fname, "wb") as f:
+        pickle.dump(all_results, f)
+
+    with open(response_pkl_fname, "wb") as f:
+        pickle.dump(responses, f)
+
+    return all_results
+
+def get_typewriter_predictions(examples):
+    all_results = []
+    for problem in examples:
+        result = problem.copy()
+        # the first type in the list is the highest-confidence one
+        result["predicted_type"] = result["typewriter_predicted_types"][0]
+        all_results.append(result)
+    return all_results
+
+def evaluate(results, verbose=False, type_from_source=True):
+    # pass type_from_source = False if running on all predictions from Typewriter (which include files for which we don't have source)
+    # the method should give the same results for type_from_source=False and type_from_source=True (if it doesn't throw an error for missing source, with type_from_source=True)
+    n_correct = 0
+    n_predictions = 0
+    n_types = 0
+    for ix, result in enumerate(results):
+        n_types += 1
+        if type_from_source:
+            true_type = result["return_type_from_source"]
+        else:
+            true_type = result["true_type"]
+        if true_type is not None:
+            true_type = normalize_type(true_type)
+        if verbose:
+            print(f"** example {ix} **")
+            print("left:")
+            print(result["left"])
+            print("right:")
+            print(result["right"][:10])
+            print("true type:")
+            print(true_type)
+        if result["predicted_type"] == UNK:
+            pred_type = None
+        else:
+            pred_type = normalize_type(result["predicted_type"])
+        this_correct = pred_type == true_type
+        if pred_type is not None:
+            n_predictions += 1
+            if this_correct:
+                n_correct += 1
+        if verbose:
+            print("pred type:")
+            print(pred_type)
+            print(f"correct?\t{this_correct}")
+            print()
+    precision = n_correct / n_predictions
+    recall = n_correct / n_types
+    f1 = 2 * precision * recall / (precision + recall)
+    return {
+        'precision': precision,
+        'recall': recall,
+        'f1': f1,
+        'n_correct': n_correct,
+        'n_predictions': n_predictions,
+        'n_types': n_types
+    }
+
 def make_parser():
     import argparse
     parser = argparse.ArgumentParser()
+    parser.add_argument("example_filename")
     parser.add_argument("--typewriter_dir", default="/private/home/dpf/data/TypeWriter_dataset")
     parser.add_argument("--crawl_root", default="/checkpoint/dpf/data/typewriter/crawl/data")
     parser.add_argument("--git_status", action="store_true")
+    parser.add_argument("--generate_examples", action="store_true")
     return parser
 
 if __name__ == "__main__":
@@ -194,4 +313,10 @@ if __name__ == "__main__":
     decontaminate = True
     imports_and_function_only = True
 
-    examples = build_examples(args.typewriter_dir, args.crawl_root, decontaminate, imports_and_function_only, split)
+    if args.generate_examples:
+        examples = build_examples(args.typewriter_dir, args.crawl_root, decontaminate, imports_and_function_only, split, show_tqdm=True)
+        with open(args.example_filename, 'w') as f:
+            json.dump(examples, f, indent=4)
+    else:
+        with open(args.example_filename, 'r') as f:
+            examples = json.load(f)

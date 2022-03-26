@@ -20,19 +20,19 @@ def run_codexglue_code_to_text(args, model: Model, result_base_path=None):
     data = load_dataset("code_x_glue_ct_code_to_text", "python", split="test")
 
     all_results = []
-    problem_iterator = [{
+    problems = [{
         "id": d["id"],
         "prompt_parts": build_docstring_infill_prompt(d["original_string"], docstring_text=d["docstring"])
     } for d in data]
 
-    if args.shard_number is not None:
+    if args.shard_number is not None and args.shard_number >= 0:
         assert 0 <= args.shard_number < args.num_shards
         shard_string = f"_shard-{args.shard_number}-of-{args.num_shards}"
-        shard_size = len(problem_iterator) // args.num_shards
+        shard_size = (len(problems) // args.num_shards) + 1
         shard_start = shard_size * args.shard_number
-        shard_end = shard_start + shard_size
+        shard_end = min(shard_start + shard_size, len(problems))
         print(f"sharding to only process instances [{shard_start}, {shard_end})")
-        problem_iterator = problem_iterator[shard_start:shard_end]
+        # problem_iterator = problem_iterator[shard_start:shard_end]
     else:
         shard_string = ""
 
@@ -45,11 +45,11 @@ def run_codexglue_code_to_text(args, model: Model, result_base_path=None):
         result_pkl_fname = f"codexglue_code_to_text{shard_string}.pkl"
         response_pkl_fname = f"codexglue_code_to_text_responses{shard_string}.pkl"
     if args.resume:
-        start = sum(1 for line in open(result_txt_fname))
+        start = sum(1 for line in open(result_txt_fname)) + shard_start
         print(f"==== Resuming from line {start} of {result_txt_fname} ====")
         result_txt = open(result_txt_fname, "a")
     else:
-        start = 0
+        start = shard_start
         print(f"==== Writing results to new file {result_txt_fname} ====")
         result_txt = open(result_txt_fname, "w")
 
@@ -57,8 +57,10 @@ def run_codexglue_code_to_text(args, model: Model, result_base_path=None):
 
     responses = {}
 
-    with tqdm.tqdm(problem_iterator, ncols=120) as pbar:
-        for i, problem in enumerate(pbar):
+    iterator = list(range(shard_start, shard_end))
+    with tqdm.tqdm(iterator, ncols=120) as pbar:
+        for i in pbar:
+            problem = problems[i]
             if i < start:
                 continue
             try:
@@ -118,7 +120,7 @@ def make_parser():
     parser.add_argument("--resume", action="store_true")
 
     parser.add_argument("--num_shards", type=int, default=10)
-    parser.add_argument("--shard_number", type=int)
+    parser.add_argument("--shard_number", type=int, default=-1)
 
     return parser
 

@@ -7,6 +7,7 @@ import ast
 from typing import Optional
 
 class TypeHintKeepOnlyTargeted(ast.NodeTransformer):
+    # based on https://stackoverflow.com/questions/42733877/remove-type-hints-in-python-source-programmatically
     def __init__(self, arg_types, matching_function, remove_type_imports=False):
         # remove_type_imports is False to match TypeWriter paper
         for arg_type in arg_types:
@@ -16,13 +17,6 @@ class TypeHintKeepOnlyTargeted(ast.NodeTransformer):
         self.matching_function = matching_function
         self.imports = []
         self.matches = []
-
-    def guard(self, callback):
-        node = callback(preserve_in_original=(is_target_node==self.preserve_other_types))
-        is_target_node = self.iter_index == self.transform_at_index
-        if is_target_node:
-            self.guard_node = node
-            self.guard_value = astunparse.unparse(self.guard_node)
 
     def visit_FunctionDef(self, node):
         if 'return' in self.arg_types and node.returns is not None and self.matching_function(function=node, returns=node.returns):
@@ -36,7 +30,13 @@ class TypeHintKeepOnlyTargeted(ast.NodeTransformer):
                     self.matches.append({'node': node, 'arg': arg})
                 else:
                     arg.annotation = None
+        self.generic_visit(node)
         return node
+
+    def visit_AnnAssign(self, node):
+        if node.value is None:
+            return None
+        return ast.Assign([node.target], node.value)
 
     def visit_Import(self, node):
         self.imports.append(node)
@@ -158,7 +158,7 @@ def create_return_example(source: str, lineno: int, return_type: Optional[str], 
         'extra_left': extra_left,
         'left': left + ' -> ',
         'right': right,
-        'return_type': return_type_from_source,
+        'return_type_from_source': return_type_from_source,
     }
 
 
