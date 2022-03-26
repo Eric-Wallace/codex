@@ -12,8 +12,9 @@ from models import make_model, Model, add_infilling_args, add_model_args, Trunca
 def make_codexglue_reference_file(output_file: str):
     ds = load_dataset("code_x_glue_ct_code_to_text", "python", split="test")
     with open(output_file, "w") as f:
-        gold = ds[i]["docstring"].encode("unicode_escape").decode("utf-8")
-        f.write(f"{i}\t{gold}\n")
+        for i in range(len(ds)):
+            gold = ds[i]["docstring"].encode("unicode_escape").decode("utf-8")
+            f.write(f"{i}\t{gold}\n")
 
 def run_codexglue_code_to_text(args, model: Model, result_base_path=None):
     data = load_dataset("code_x_glue_ct_code_to_text", "python", split="test")
