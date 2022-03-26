@@ -34,6 +34,8 @@ def run_codexglue_code_to_text(args, model: Model, result_base_path=None, split=
         print(f"sharding to only process instances [{shard_start}, {shard_end})")
         # problem_iterator = problem_iterator[shard_start:shard_end]
     else:
+        shard_start = 0
+        shard_end = len(problems)
         shard_string = ""
 
     if result_base_path is not None:

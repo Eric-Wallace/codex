@@ -192,6 +192,8 @@ def run_return_prediction(args, examples, model: Model, result_base_path=None):
         print(f"sharding to only process instances [{shard_start}, {shard_end})")
         # problem_iterator = problem_iterator[shard_start:shard_end]
     else:
+        shard_start = 0
+        shard_end = len(examples)
         shard_string = ""
 
     if result_base_path is not None:
@@ -201,8 +203,10 @@ def run_return_prediction(args, examples, model: Model, result_base_path=None):
         result_pkl_fname = f"typewriter{shard_string}.pkl"
         response_pkl_fname = f"typewriter{shard_string}.pkl"
 
-    with tqdm.tqdm(examples, ncols=120) as pbar:
-        for i, problem in enumerate(pbar):
+    indices = list(range(shard_start, shard_end))
+    with tqdm.tqdm(indices, ncols=120) as pbar:
+        for i in pbar:
+            problem = examples[i]
             # TODO: could add extra sentinels here to take the place of omitted code, 
             # if we're doing bidirectional_generation with our CM model
             left = "\n".join(problem["extra_left"]) + problem["left"]
@@ -306,6 +310,10 @@ def evaluate(results, verbose=False, type_from_source=True):
         'n_types': n_types
     }
 
+def load_json(fname):
+    with open(fname, 'r') as f:
+        return json.load(f)
+
 def make_parser():
     import argparse
     parser = argparse.ArgumentParser()
@@ -323,6 +331,8 @@ def make_parser():
 
     parser.add_argument("--num_shards", type=int, default=10)
     parser.add_argument("--shard_number", type=int, default=-1)
+
+    parser.add_argument("--serialized_results_paths")
 
     return parser
 
@@ -343,12 +353,18 @@ if __name__ == "__main__":
         with open(args.example_filename, 'w') as f:
             json.dump(examples, f, indent=4)
     else:
-        with open(args.example_filename, 'r') as f:
-            examples = json.load(f)
-        
+        examples = load_json(args.example_filename)
         if args.num_examples:
             examples = examples[:args.num_examples]
-        model = make_model(args)
 
-        results = run_return_prediction(args, examples, model, result_base_path=args.result_base_path)
+        if args.serialized_results_paths is not None:
+            results = []
+            for path in args.serialized_results_paths:
+                results += load_json(path)
+        else:
+            model = make_model(args)
+            results = run_return_prediction(args, examples, model, result_base_path=args.result_base_path)
+        
+        if len(results) != len(examples):
+            print(f"warning: {len(examples)} examples but {len(results)} results")
         pprint.pprint(evaluate(results, type_from_source=True))

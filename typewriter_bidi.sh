@@ -15,6 +15,8 @@ else
   outdir=${outdir}/shard_${shard}
 fi
 
+mkdir -p $outdir
+
 python typewriter.py \
   data/typewriter_examples.json \
   --git_status \
