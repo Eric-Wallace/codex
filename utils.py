@@ -3,6 +3,7 @@ import pickle
 import json
 import sys
 import subprocess
+import re
 
 TRIPLE_QUOTE = '"""'
 SINGLE_TRIPLE_QUOTE = "'''"
@@ -10,9 +11,58 @@ SPACES4 = " " * 4
 SPACES8 = " " * 8
 EOF = "<|/ file |>"
 
-COMMENT_DELIMITERS = ('"', "'", "\n")
+def standardize_docstring_prompt(prefix: str, suffix: str) -> str:
+    """Strips any existing docstring delimiters from the prompt prefix and suffix
+    and adds our own delimiter and whitespace.
 
-def build_docstring_infill_prompt(code: str, docstring_text: str = None) -> List[str]:
+    Note lots of edge cases being handled here:
+    - codexglue docstring text sometimes contains the docstring delimiters, inconsistently
+    - suffix can contain other functions with docstrings
+    - prefix should keep the correct indentation for the whitespace
+    """
+    original_delim = None
+
+    for delim in [TRIPLE_QUOTE, SINGLE_TRIPLE_QUOTE]:
+        if delim in prefix:
+            prefix = prefix[:prefix.index(delim)]
+            original_delim = delim
+            break
+
+    # Need to be more careful about looking for single quote delimiters,
+    #  since they can be used in strings
+    single_single_quote_with_trailing_spaces = re.compile(r'[^\'"][\']\s*$')
+    if single_single_quote_with_trailing_spaces.search(prefix):
+        prefix = prefix[:single_single_quote_with_trailing_spaces.search(prefix).start()]
+        original_delim = "'"
+
+    single_double_quote_with_trailing_spaces = re.compile(r'[^\'"]["]\s*$')
+    if single_double_quote_with_trailing_spaces.search(prefix):
+        prefix = prefix[:single_double_quote_with_trailing_spaces.search(prefix).start()]
+        original_delim = '"'
+
+    # If we know the original delimiter, we can remove it from the suffix
+    if original_delim is not None:
+        if original_delim in suffix:
+            suffix = suffix[suffix.index(original_delim) + len(original_delim):]
+    # Delimiter not in prefix, check we don't have a delimiter in suffix
+    else:
+        triple_quote_with_leading_spaces = re.compile(r'^\s*(\'\'\'|""")')
+        if triple_quote_with_leading_spaces.search(suffix):
+            suffix = suffix[triple_quote_with_leading_spaces.search(suffix).end():]
+
+        single_quote_with_leading_spaces = re.compile(r'^\s*[\'"]\s*\n')
+        if single_quote_with_leading_spaces.search(suffix):
+            suffix = suffix[single_quote_with_leading_spaces.search(suffix).end() - 1:]
+
+    prefix += TRIPLE_QUOTE
+    suffix = "\n" + suffix
+    return [prefix, suffix]
+
+
+def build_docstring_infill_prompt(code: str,
+        docstring_text: str = None,
+        standardize_docstring: bool = True,
+        ) -> List[str]:
     """Splits the function into a prompt prefix and suffix for the code -> docstring infilling task.
 
     Args:
@@ -34,14 +84,11 @@ def build_docstring_infill_prompt(code: str, docstring_text: str = None) -> List
         prompt_prefix = f"{function_def}\n{SPACES4}{TRIPLE_QUOTE}"
         prompt_suffix = "{TRIPLE_QUOTE}\n{body}"
 
+    if standardize_docstring:
+        prompt_prefix, prompt_suffix = standardize_docstring_prompt(prompt_prefix, prompt_suffix)
+
     prompt_suffix += f"\n{EOF}"
-
     return [prompt_prefix, prompt_suffix]
-
-def build_random_chunk_repair_infill_prompt(code: str) -> List[str]:
-    """Creates a prompt to test repair by randomly masking a chunk of code.
-    """
-    pass
 
 def build_systematic_infill_prompt(original_prompt: str, code: str, num_before: int, num_after: int) -> Tuple[List[str], str]:
     """Creates a prompt with given number of lines before and after to test infill systematically.
@@ -70,13 +117,10 @@ def truncate_docstring_infill(infill: str) -> str:
 
     Note: assumes that there's no ' or " within the valid docstring
     """
-    # remove leading whitespace
     infill = infill.strip()
     # try to figure out where the end of the comment is
-    for delim in COMMENT_DELIMITERS: 
-        if delim in infill:
-            infill = infill[:infill.index(delim)]
-    # remove trailing whitespace
+    if TRIPLE_QUOTE in infill:
+        infill = infill[:infill.index(delim)]
     infill = infill.strip()
     return infill
 
@@ -85,31 +129,6 @@ def truncate_num_lines(infill: str, max_num_lines: int = 1) -> str:
     infill_lines = stripped_line_split(infill)
 
     return "\n".join(infill_lines[:max_num_lines])
-    # if infill.startswith("\n"):
-    #     infill = infill[1:]
-
-    # # already one line
-    # if "\n" not in infill:
-    #     return infill
-    
-    # infilled_line = infill[:find_nth(infill, "\n", max_num_lines) + 1]
-    # if not infilled_line.count("\n") <= max_num_lines:
-    #     print(len(infilled_line.split("\n")))
-    #     print(max_num_lines)
-    #     import pdb; pdb.set_trace()
-
-    # return infilled_line
-
-#        if "\n" not in infill[1:]:
-#            infilled_line = infill
-#        else:
-#            infilled_line = infill[:infill[1:].index("\n") + 1]
-#    else:
-#        if "\n" in infill:
-#            infilled_line = infill[:infill.index("\n") + 1]
-#        else:
-#            infilled_line = infill
-#    return infilled_line
 
 def stripped_line_split(text):
     return text.strip("\n").split("\n")
@@ -122,13 +141,6 @@ def truncate_overlap(infill, suffix, minimum_num_characters=None, minimum_num_su
         if infill[-i:] == suffix[:i]:
             return infill[:-i]
     return infill
-
-def find_nth(haystack, needle, n):
-    start = haystack.find(needle)
-    while start >= 0 and n > 1:
-        start = haystack.find(needle, start+len(needle))
-        n -= 1
-    return start
 
 def read_file(filename):
     if filename.endswith(".json"):

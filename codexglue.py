@@ -9,6 +9,12 @@ from datasets import load_dataset
 from utils import build_docstring_infill_prompt, dump_git_status, dump_version_info
 from models import make_model, Model, add_infilling_args, add_model_args, TruncationParameters
 
+def make_codexglue_reference_file(output_file: str):
+    ds = load_dataset("code_x_glue_ct_code_to_text", "python", split="test")
+    with open(output_file, "w") as f:
+        gold = ds[i]["docstring"].encode("unicode_escape").decode("utf-8")
+        f.write(f"{i}\t{gold}\n")
+
 def run_codexglue_code_to_text(args, model: Model, result_base_path=None):
     data = load_dataset("code_x_glue_ct_code_to_text", "python", split="test")
 
@@ -83,8 +89,8 @@ def run_codexglue_code_to_text(args, model: Model, result_base_path=None):
                 all_results.append(infill_result)
 
                 # Write docstring to file for BLEU eval
-                result_txt.write(f"{i}\t{infill_result['text']}\n")
-                if i % 50 == 0:
+                result_txt.write(f"{i}\t{infill_result['text'].encode('unicode_escape').decode('utf-8')}\n")
+                if i % 10 == 0:
                     result_txt.flush()
             except Exception as e:
                 print(f"Error on {i}")
@@ -114,7 +120,6 @@ def make_parser():
     parser.add_argument("--shard_number", type=int)
 
     return parser
-
 
 if __name__ == "__main__":
     print(' '.join(sys.argv))

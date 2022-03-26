@@ -19,5 +19,4 @@ python codexglue.py \
   --num_candidates ${num_candidates} \
   --bidirectional_generation \
   --result_base_path ${outdir}/results \
-  --resume \
   | tee ${outdir}/log.out
