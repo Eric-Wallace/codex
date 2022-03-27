@@ -219,11 +219,12 @@ def run_return_prediction(args, examples, model: Model, result_base_path=None):
                     TruncationParameters.from_heuristics(["stop_words"], stop_words=stop_words)
                 ]
             kwargs = dict(
-                verbose=False, n=args.num_candidates,
+                n=args.num_candidates,
                 bidirectional_generation=args.bidirectional_generation, bidirectional_scoring=args.bidirectional_scoring,
                 truncation_parameters=truncation_parameters,
                 scoring=args.candidate_scoring,
                 stop_words=stop_words,
+                verbose=True,
             )
             if args.max_tokens is not None:
                 kwargs['max_tokens'] = args.max_tokens
@@ -314,6 +315,10 @@ def load_json(fname):
     with open(fname, 'r') as f:
         return json.load(f)
 
+def load_pickle(fname):
+    with open(fname, 'rb') as f:
+        return pickle.load(f)
+
 def make_parser():
     import argparse
     parser = argparse.ArgumentParser()
@@ -332,7 +337,10 @@ def make_parser():
     parser.add_argument("--num_shards", type=int, default=10)
     parser.add_argument("--shard_number", type=int, default=-1)
 
-    parser.add_argument("--serialized_results_paths")
+    parser.add_argument("--serialized_results_paths", nargs='*')
+    parser.add_argument("--eval_typewriter", action="store_true")
+
+    parser.add_argument("--full_file", action="store_true")
 
     return parser
 
@@ -346,7 +354,7 @@ if __name__ == "__main__":
         dump_version_info()
 
     split = 'validation'
-    imports_and_function_only = True
+    imports_and_function_only = not args.full_file
 
     if args.generate_examples:
         examples = build_examples(args.typewriter_dir, args.crawl_root, imports_and_function_only, split, show_tqdm=True)
@@ -360,10 +368,13 @@ if __name__ == "__main__":
         if args.serialized_results_paths is not None:
             results = []
             for path in args.serialized_results_paths:
-                results += load_json(path)
+                results += load_pickle(path)
         else:
             model = make_model(args)
             results = run_return_prediction(args, examples, model, result_base_path=args.result_base_path)
+        
+        if args.eval_typewriter:
+            results = get_typewriter_predictions(results)
         
         if len(results) != len(examples):
             print(f"warning: {len(examples)} examples but {len(results)} results")

@@ -57,7 +57,7 @@ class DecodingBase(nn.Module):
         self.dummy_param = nn.Parameter(torch.empty(0))
         self.show_tqdm = show_tqdm
 
-    def decode_multiple_candidates(self, prefix: torch.Tensor, num_candidates: int = 1, encoded_stop_words: Optional[List[List[int]]] = None):
+    def decode_multiple_candidates(self, prefix: torch.Tensor, num_candidates: int = 1, encoded_stop_words: Optional[List[List[int]]] = None, all_must_complete=True):
         """
         returns: (tokens, token_logprobs)
         tokens: (batch_size x max_seq_length) LongTensor
@@ -140,17 +140,17 @@ class DecodingBase(nn.Module):
                                     print(f"warning: stopping on {token.item()} at step {step} within prefix {prefix}")
                                 candidate_found_stop = True
                         found_stop[candidate_ix] |= candidate_found_stop
-                if found_stop.all():
+                if (all_must_complete and found_stop.all()) or ((not all_must_complete) and found_stop.any()):
                     tokens = tokens[:, :step+1]
                     token_log_probs = token_log_probs[:, :step+1]
                     break
-            return tokens, token_log_probs, seq_lengths
+            return tokens, token_log_probs, seq_lengths, found_stop
 
 
     def decode(self, prefix: Optional[torch.Tensor] = None, return_log_probs=False, encoded_stop_words: List[List[int]]=None) -> torch.Tensor:
         if prefix is None:
             prefix = torch.tensor([self.eos]).to(self.dummy_param.device)
-        tokens, token_log_probs, seq_lengths = self.decode_multiple_candidates(prefix, num_candidates=num_candidates, encoded_stop_words=encoded_stop_words)
+        tokens, token_log_probs, seq_lengths = self.decode_multiple_candidates(prefix, num_candidates=1, encoded_stop_words=encoded_stop_words)
         if return_log_probs:
             return tokens.squeeze(0), token_log_probs.squeeze(0)
         else:

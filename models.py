@@ -202,6 +202,7 @@ class Model:
                 print(f"--infill (truncated):--\n{text}")
                 print(f"--infill (untruncated):--\n{text_untruncated}")
                 print(f"--suffix:--\n{suffix}")
+                print(f"--decoded ids:--\n{self._decode(choice['ids'])}")
 
             def maybe_append_newline(s):
                 if not s.endswith("\n"):
@@ -443,7 +444,7 @@ class FairseqModel(Model):
                 all_scores.append(score.item())
         return all_scores
 
-    def _generate(self, encoded_prompt: torch.tensor, max_tokens, top_p=0.95, n=1, temperature=0.6, extra_encoded_stop_words=None):
+    def _generate(self, encoded_prompt: torch.tensor, max_tokens, top_p=0.95, n=1, temperature=0.6, extra_encoded_stop_words=None, all_must_complete=True):
         if isinstance(encoded_prompt, list):
             encoded_prompt = torch.tensor(encoded_prompt)
         assert encoded_prompt.dim() == 1
@@ -472,12 +473,13 @@ class FairseqModel(Model):
         num_yielded = 0
         while num_yielded < n:
             this_batch_size = min(self.args.batch_size, n - num_yielded)
-            multi_completion_tokens, multi_completion_token_log_probs, multi_completion_lengths = decoder.decode_multiple_candidates(
+            multi_completion_tokens, multi_completion_token_log_probs, multi_completion_lengths, multi_found_stop = decoder.decode_multiple_candidates(
                 encoded_prompt.to(self.lm_model.device),
                 num_candidates=this_batch_size,
                 encoded_stop_words=encoded_stop_words,
+                all_must_complete=all_must_complete,
             )
-            assert multi_completion_tokens.size(0) == multi_completion_token_log_probs.size(0) == multi_completion_lengths.size(0) == this_batch_size
+            assert multi_completion_tokens.size(0) == multi_completion_token_log_probs.size(0) == multi_completion_lengths.size(0) == multi_found_stop.size(0) == this_batch_size
             for completion_ix in range(this_batch_size):
                 completion_length = multi_completion_lengths[completion_ix].item()
                 completion_tokens = multi_completion_tokens[completion_ix][:completion_length]
@@ -488,7 +490,7 @@ class FairseqModel(Model):
                 completion_token_log_probs = completion_token_log_probs[1:]
                 assert completion_tokens.size() == completion_token_log_probs.size()
                 assert torch.allclose(completion_tokens[:len(encoded_prompt)], encoded_prompt)
-                yield completion_tokens[len(encoded_prompt):], completion_token_log_probs[len(encoded_prompt):]
+                yield completion_tokens[len(encoded_prompt):], completion_token_log_probs[len(encoded_prompt):], multi_found_stop[completion_ix].item()
                 num_yielded += 1
 
     def _truncate_at_stop_words(self, stop_words, sequence_ids, logprobs, show_warnings=True):
@@ -541,7 +543,7 @@ class FairseqModel(Model):
 
         all_tokens = []
         all_log_probs = []
-        for tokens, log_probs in self._generate(
+        for tokens, log_probs, found_stop in self._generate(
             encoded_prompt,
             max_tokens=max_tokens,
             top_p=top_p,
@@ -711,18 +713,20 @@ class CausalMasking(FairseqModel):
                 # print(self._decode(ids))
                 attempt_num = 0
                 generated_eoss = False
-                for completion, scores in self._generate(
+                for completion, scores, found_stop in self._generate(
                     torch.tensor(ids),
                     max_tokens=max_tokens,
                     top_p=top_p,
                     n=self.args.max_infill_attempts,
                     temperature=temperature,
                     extra_encoded_stop_words=encoded_stop_words,
+                    all_must_complete=True,
                 ):
                     attempt_num += 1
                     completion = completion.tolist()
-                    # allow ourselves up to max_infill_attempts to find a sequence ending in EOSS_ID
-                    if self.EOSS_ID in completion:
+                    # allow ourselves up to max_infill_attempts to find a stop word:
+                    # TODO: found_stop is True if self.EOSS_ID in completion, since we passed EOSS as a stopword (verify this; and roll in)
+                    if self.EOSS_ID in completion or found_stop:
                         generated_eoss = True
                         break
                 if completion[-1] == 2:

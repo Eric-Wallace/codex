@@ -4,7 +4,62 @@ from operator import index
 from os import remove
 import astunparse
 import ast
+import libcst as cst
 from typing import Optional
+
+class TypeHintKeepOnlyTargetedFormatPreserving(cst.CSTTransformer):
+    # based on https://stackoverflow.com/questions/42733877/remove-type-hints-in-python-source-programmatically
+    def __init__(self, arg_types, matching_function, remove_type_imports=False):
+        # remove_type_imports is False to match TypeWriter paper
+        for arg_type in arg_types:
+            assert arg_type in ['return', 'argument']
+        self.arg_types = arg_types
+        self.remove_type_imports = remove_type_imports
+        self.matching_function = matching_function
+        self.imports = []
+        self.matches = []
+
+    def leave_FunctionDef(self, node, updated_node):
+        if 'return' in self.arg_types and node.returns is not None and self.matching_function(function=node, returns=node.returns):
+            self.matches.append({'node': node, 'returns': node.returns})
+        else:
+            updated_node = updated_node.with_changes(
+                returns=None,
+            )
+
+        if node.params.params:
+            args = []
+            for arg in node.params.params:
+                if 'argument' in self.arg_types and arg is not None and self.matching_function(function=node, arg=arg):
+                    self.matches.append({'node': node, 'arg': arg})
+                else:
+                    arg = arg.with_changes(annotation=None)
+                args.append(arg)
+            updated_node = updated_node.with_changes(params=node.params.with_changes(params=args))
+
+        return updated_node
+
+    def leave_AnnAssign(self, node, updated_node):
+        new_node = cst.Assign([cst.AssignTarget(
+            target=updated_node.target,
+            whitespace_before_equal=cst.SimpleWhitespace(' '),
+            whitespace_after_equal=cst.SimpleWhitespace(' '),
+        )], updated_node.value)
+        return new_node
+
+    def leave_Import(self, node, updated_node):
+        self.imports.append(node)
+        if self.remove_type_imports:
+            names = [n for n in updated_node.names if n.name != 'typing']
+            updated_node = updated_node.with_changes(names=names)
+            return updated_node if names else None
+        return updated_node
+
+    def leave_ImportFrom(self, node, updated_node):
+        self.imports.append(node)
+        if self.remove_type_imports and node.module == 'typing':
+            return None
+        return updated_node
 
 class TypeHintKeepOnlyTargeted(ast.NodeTransformer):
     # based on https://stackoverflow.com/questions/42733877/remove-type-hints-in-python-source-programmatically
@@ -126,7 +181,7 @@ def normalize_type(type_, requires_parse=True) -> str:
         parsed = type_
     return astunparse.unparse(parsed).strip()
 
-def create_return_example(source: str, lineno: int, return_type: Optional[str], imports_and_function=True):
+def create_return_example(source: str, lineno: int, return_type: Optional[str], imports_and_function=True, preserve_formatting=False):
     # pass None for return_type if the type is unknown to not require a type match (@@UNK@@ in the typewriter data)
     def match_with_line_and_type(function, returns):
         matches_type = (return_type is None) or normalize_type(returns, requires_parse=True) == normalize_type(return_type, requires_parse=True)

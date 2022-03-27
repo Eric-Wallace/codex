@@ -60,7 +60,10 @@ def run_systematic_infill(args, model: Model, eval_type="one_line", result_base_
     with tqdm.tqdm(problem_iterator, ncols=120) as pbar:
         for i, (task_id, task_id_problems) in enumerate(pbar):
             if functional_results:
-                pbar.set_postfix(compute_metrics())
+                metrics = compute_metrics()
+                pbar.set_postfix(metrics)
+                if eval_type == 'all_lines':
+                    print("\n", i, metrics)
 
             humaneval_problem = problems[task_id]
             
@@ -82,6 +85,7 @@ def run_systematic_infill(args, model: Model, eval_type="one_line", result_base_
                     bidirectional_generation=args.bidirectional_generation, bidirectional_scoring=args.bidirectional_scoring,
                     truncation_parameters=truncation_parameters,
                     scoring=args.candidate_scoring,
+                    stop_words=HUMAN_EVAL_STOP_WORDS,
                 )
                 if args.max_tokens is not None:
                     kwargs['max_tokens'] = args.max_tokens
