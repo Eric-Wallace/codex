@@ -1,6 +1,7 @@
 #!/bin/bash
 
 model="/checkpoint/dpf/models/cm-6B-armen/checkpoint_last_consolidated.pt"
+#model=/home/jessy/projects/codex/evaluations/cm-6B-ourtok/38250.pt
 
 num_candidates=$1
 temperature=$2
@@ -36,5 +37,3 @@ python codexglue.py \
   --split $split \
   --shard_number $shard \
   | tee ${outdir}/log.out
-
-  #--resume \
