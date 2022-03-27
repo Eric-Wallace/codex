@@ -214,6 +214,9 @@ def run_return_prediction(args, examples, model: Model, result_base_path=None):
             
             p_left = problem["left"]
             p_right = problem["right"]
+
+            # indicate to the model that the previous function has ended
+            p_right = p_right + "\n\ndef "
             if p_right.startswith(":"):
                 p_right = p_right[1:]
             if "(self" in '\n'.join(p_left.split('\n')[0:2]):

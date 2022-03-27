@@ -8,7 +8,7 @@ temperature=0.0
 suffix="_formatted_iandf"
 #suffix="_formatted_full"
 
-outdir="expts/typewriter/cm-6B${suffix}_indent_ncg-${num_candidates}_temp-${temperature}_prompt-py"
+outdir="expts/typewriter/cm-6B${suffix}_indent_def_ncg-${num_candidates}_temp-${temperature}_prompt-py"
 #outdir="expts/typewriter/cm-6B${suffix}_ncg-${num_candidates}_temp-${temperature}"
 
 shard=$1
