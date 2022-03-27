@@ -207,12 +207,24 @@ def run_return_prediction(args, examples, model: Model, result_base_path=None):
     with tqdm.tqdm(indices, ncols=120) as pbar:
         for i in pbar:
             problem = examples[i]
-            # TODO: could add extra sentinels here to take the place of omitted code, 
-            # if we're doing bidirectional_generation with our CM model
-            left = "\n".join(problem["extra_left"]) + problem["left"]
-            right = problem["right"]
-            if right.startswith(":"):
-                right = right[1:]
+            left = "\n".join(problem["extra_left"])
+            # left = ""
+            if left:
+                left += "\n\n"
+            
+            p_left = problem["left"]
+            p_right = problem["right"]
+            if p_right.startswith(":"):
+                p_right = p_right[1:]
+            if "(self" in '\n'.join(p_left.split('\n')[0:2]):
+                did_indent = True
+                p_left = '\n'.join([" "*4 + line for line in p_left.split('\n')])
+                p_right = '\n'.join([" "*4 + line for line in p_right.split('\n')])
+            else:
+                did_indent = False
+            # did_indent = False
+            left += p_left
+            right = p_right
             prompt_parts = [left, right]
             stop_words = [':']
             truncation_parameters = [
@@ -224,7 +236,7 @@ def run_return_prediction(args, examples, model: Model, result_base_path=None):
                 truncation_parameters=truncation_parameters,
                 scoring=args.candidate_scoring,
                 stop_words=stop_words,
-                verbose=True,
+                verbose=did_indent,
             )
             if args.max_tokens is not None:
                 kwargs['max_tokens'] = args.max_tokens
@@ -371,6 +383,9 @@ if __name__ == "__main__":
                 results += load_pickle(path)
         else:
             model = make_model(args)
+            # 10 for some buffer
+            model.max_seq_length = 2048-10
+
             results = run_return_prediction(args, examples, model, result_base_path=args.result_base_path)
         
         if args.eval_typewriter:

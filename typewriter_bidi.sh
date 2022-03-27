@@ -5,7 +5,11 @@ model="/checkpoint/dpf/models/cm-6B-armen/checkpoint_last_consolidated.pt"
 num_candidates=1
 temperature=0.0
 
-outdir="expts/codexglue_code_to_text/cm-6B_ncg-${num_candidates}_temp-${temperature}"
+suffix="_formatted_iandf"
+#suffix="_formatted_full"
+
+outdir="expts/typewriter/cm-6B${suffix}_indent_ncg-${num_candidates}_temp-${temperature}_prompt-py"
+#outdir="expts/typewriter/cm-6B${suffix}_ncg-${num_candidates}_temp-${temperature}"
 
 shard=$1
 if [ -z $shard ]
@@ -18,7 +22,7 @@ fi
 mkdir -p $outdir
 
 python typewriter.py \
-  data/typewriter_examples.json \
+  data/typewriter_examples${suffix}.json \
   --git_status \
   --model_name ${model} \
   --tokenizer_name gpt2_pretokenization_newlines_only  \
@@ -29,4 +33,5 @@ python typewriter.py \
   --truncation_heuristics  \
   --result_base_path $outdir/results \
   --shard_number $shard \
+  --prompt_prefix "<| file ext=.py |>" \
   | tee ${outdir}/log.out

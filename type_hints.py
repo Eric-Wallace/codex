@@ -6,6 +6,9 @@ import astunparse
 import ast
 import libcst as cst
 from typing import Optional
+import re
+
+arrow_re = re.compile("\s*->\s*")
 
 class TypeHintKeepOnlyTargetedFormatPreserving(cst.CSTTransformer):
     # based on https://stackoverflow.com/questions/42733877/remove-type-hints-in-python-source-programmatically
@@ -15,17 +18,18 @@ class TypeHintKeepOnlyTargetedFormatPreserving(cst.CSTTransformer):
             assert arg_type in ['return', 'argument']
         self.arg_types = arg_types
         self.remove_type_imports = remove_type_imports
+        if remove_type_imports:
+            raise NotImplementedError()
         self.matching_function = matching_function
         self.imports = []
         self.matches = []
 
     def leave_FunctionDef(self, node, updated_node):
         if 'return' in self.arg_types and node.returns is not None and self.matching_function(function=node, returns=node.returns):
-            self.matches.append({'node': node, 'returns': node.returns})
+            is_target = True
         else:
-            updated_node = updated_node.with_changes(
-                returns=None,
-            )
+            is_target = False
+            updated_node = updated_node.deep_remove(updated_node.returns)
 
         if node.params.params:
             args = []
@@ -33,10 +37,12 @@ class TypeHintKeepOnlyTargetedFormatPreserving(cst.CSTTransformer):
                 if 'argument' in self.arg_types and arg is not None and self.matching_function(function=node, arg=arg):
                     self.matches.append({'node': node, 'arg': arg})
                 else:
-                    arg = arg.with_changes(annotation=None)
+                    arg = arg.deep_remove(arg.annotation)
                 args.append(arg)
             updated_node = updated_node.with_changes(params=node.params.with_changes(params=args))
 
+        if is_target:
+            self.matches.append({'original_node': node, 'node': updated_node, 'returns': updated_node.returns})
         return updated_node
 
     def leave_AnnAssign(self, node, updated_node):
@@ -49,16 +55,10 @@ class TypeHintKeepOnlyTargetedFormatPreserving(cst.CSTTransformer):
 
     def leave_Import(self, node, updated_node):
         self.imports.append(node)
-        if self.remove_type_imports:
-            names = [n for n in updated_node.names if n.name != 'typing']
-            updated_node = updated_node.with_changes(names=names)
-            return updated_node if names else None
         return updated_node
 
     def leave_ImportFrom(self, node, updated_node):
         self.imports.append(node)
-        if self.remove_type_imports and node.module == 'typing':
-            return None
         return updated_node
 
 class TypeHintKeepOnlyTargeted(ast.NodeTransformer):
@@ -181,34 +181,54 @@ def normalize_type(type_, requires_parse=True) -> str:
         parsed = type_
     return astunparse.unparse(parsed).strip()
 
-def create_return_example(source: str, lineno: int, return_type: Optional[str], imports_and_function=True, preserve_formatting=False):
+def create_return_example(source: str, lineno: int, return_type: Optional[str], imports_and_function=True):
     # pass None for return_type if the type is unknown to not require a type match (@@UNK@@ in the typewriter data)
+    wrapper = cst.MetadataWrapper(cst.parse_module(source))
+    position = wrapper.resolve(cst.metadata.PositionProvider)
+    parsed_source = wrapper.module
     def match_with_line_and_type(function, returns):
-        matches_type = (return_type is None) or normalize_type(returns, requires_parse=True) == normalize_type(return_type, requires_parse=True)
-        matches_line = lineno == function.lineno
-        # if return_type is None:
-        #     print(lineno, function.lineno, astunparse.unparse(returns).strip(), matches_type, matches_line)
-        # if matches_type:
-        #     print(f"match type at line {lineno}, {function.lineno}, {returns.lineno};\t{matches_line}")
+        function_lineno = position[function].start.line
+        return_lineno = position[returns].start.line
+        this_return_type = parsed_source.code_for_node(returns.annotation)
+        matches_type = (return_type is None) or normalize_type(this_return_type, requires_parse=True) == normalize_type(return_type, requires_parse=True)
+        matches_line = (lineno == return_lineno) or (lineno == function_lineno) or (lineno == function_lineno-2) or (lineno == function_lineno-1)
         return matches_type and matches_line
-    processor = TypeHintKeepOnlyTargeted(['return'], match_with_line_and_type)
-    parsed_source = ast.parse(source)
+    processor = TypeHintKeepOnlyTargetedFormatPreserving(['return'], match_with_line_and_type)
     # remove the type annotations, except for the target
-    processor.visit(parsed_source)
-    if len(processor.matches) != 1:
-        # print(f"{len(processor.matches)} matches found!")
-        # print(f"return_type: {return_type}")
-        # print('\n'.join(source.splitlines()[lineno-5:lineno+5]))
+    try:
+        transformed_parsed_source = parsed_source.visit(processor)
+    except Exception as e:
+        # visit has trouble with e.g. assignments where the value is an unimported class
+        print(e)
         return None
 
-    return_type_from_source = normalize_type(processor.matches[0]['returns'], requires_parse=False)
+    if len(processor.matches) != 1:
+        print(f"{len(processor.matches)} matches found!")
+        print(f"return_type: {return_type}")
+        print('\n'.join(source.splitlines()[lineno-1:lineno+2]))
+        return None
+
+    return_type_from_source = transformed_parsed_source.code_for_node(processor.matches[0]['returns'].annotation)
+
+    return_type_from_source = normalize_type(return_type_from_source)
     
     if imports_and_function:
-        extra_left = [astunparse.unparse(node).strip() for node in processor.imports]
-        to_split = astunparse.unparse(processor.matches[0]['node'])
+        extra_left = [transformed_parsed_source.code_for_node(node) for node in processor.imports]
+        try:
+            to_split = transformed_parsed_source.code_for_node(processor.matches[0]['node'])
+        except Exception as e:
+            print(e)
+            return None
     else:
         extra_left = []
-        to_split = astunparse.unparse(parsed_source)
+        try:
+            to_split = transformed_parsed_source.code
+        except Exception as e:
+            # .code has trouble with e.g. assignments of boolean values created by an equality test
+            print(e)
+            return None
+    
+    to_split = arrow_re.sub(" -> ", to_split)
     pairs = list(derive_prefix_suffix(to_split, f" -> {return_type_from_source}"))
     if len(pairs) != 1:
         return None

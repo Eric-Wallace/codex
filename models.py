@@ -350,7 +350,7 @@ class HFModel(Model):
         return return_json
 
 class FairseqModel(Model):
-    def __init__(self, args: argparse.Namespace, model_path: str, prompt_prefix=None, batch_size=None, model=None):
+    def __init__(self, args: argparse.Namespace, model_path: str, prompt_prefix=None, batch_size=None, model=None, max_seq_length=None):
         self.args = args
         tokenizer_name = args.tokenizer_name
         if tokenizer_name is None:
@@ -391,6 +391,8 @@ class FairseqModel(Model):
         self.eos_index = self.lm_model.task.dictionary.eos_index
 
         self.batch_size = batch_size
+
+        self.max_seq_length = max_seq_length
 
     def encode_stop_words(self, stop_words: List[str]):
         # TODO: I don't think this is needed anymore
@@ -448,6 +450,9 @@ class FairseqModel(Model):
         if isinstance(encoded_prompt, list):
             encoded_prompt = torch.tensor(encoded_prompt)
         assert encoded_prompt.dim() == 1
+        if self.max_seq_length and (len(encoded_prompt) + max_tokens > self.max_seq_length):
+            new_len = self.max_seq_length-(max_tokens)
+            encoded_prompt = encoded_prompt[-new_len:]
         prompt_len = len(encoded_prompt)
         from priming_generator import GreedyDecoding, TopPSampling
         # strip EOS from end
