@@ -28,19 +28,32 @@ def run_systematic_infill(args, model: Model, eval_type="one_line", result_base_
 
     assert eval_type in ("one_line", "all_lines")
 
-    all_results = []
-    if result_base_path is not None:
-        result_json_fname = f"{result_base_path}.json"
-        result_pkl_fname = f"{result_base_path}.pkl"
-        response_pkl_fname = f"{result_base_path}_responses.pkl"
-    else:
-        result_json_fname = f"he_{eval_type}_systematic.json"
-        result_pkl_fname = f"he_{eval_type}_systematic.pkl"
-        response_pkl_fname = f"he_{eval_type}_responses.pkl"
-    result_json = open(result_json_fname, "w")
-
     problems = read_problems()
     problem_iterator = list(generate_he_infill_problems(args, eval_type))
+
+    if args.shard_number is not None and args.shard_number >= 0:
+        assert 0 <= args.shard_number < args.num_shards
+        shard_string = f"_shard-{args.shard_number}-of-{args.num_shards}"
+        shard_size = (len(problem_iterator) // args.num_shards) + 1
+        shard_start = shard_size * args.shard_number
+        shard_end = min(shard_start + shard_size, len(problem_iterator))
+        print(f"sharding to only process instances [{shard_start}, {shard_end})")
+        # problem_iterator = problem_iterator[shard_start:shard_end]
+    else:
+        shard_start = 0
+        shard_end = len(problem_iterator)
+        shard_string = ""
+
+    all_results = []
+    if result_base_path is not None:
+        result_json_fname = f"{result_base_path}{shard_string}.json"
+        result_pkl_fname = f"{result_base_path}{shard_string}.pkl"
+        response_pkl_fname = f"{result_base_path}{shard_string}_responses.pkl"
+    else:
+        result_json_fname = f"he_{eval_type}_systematic{shard_string}.json"
+        result_pkl_fname = f"he_{eval_type}_systematic{shard_string}.pkl"
+        response_pkl_fname = f"he_{eval_type}_responses{shard_string}.pkl"
+    result_json = open(result_json_fname, "w")
 
     responses = {}
 
@@ -57,8 +70,11 @@ def run_systematic_infill(args, model: Model, eval_type="one_line", result_base_
             metrics.update(hit_max=max_attempt_fraction, avg_non_max=non_max_attempts)
         return metrics
 
-    with tqdm.tqdm(problem_iterator, ncols=120) as pbar:
-        for i, (task_id, task_id_problems) in enumerate(pbar):
+    indices = list(range(shard_start, shard_end))
+
+    with tqdm.tqdm(indices, ncols=120) as pbar:
+        for i in pbar:
+            task_id, task_id_problems = problem_iterator[i]
             if functional_results:
                 metrics = compute_metrics()
                 pbar.set_postfix(metrics)
@@ -196,6 +212,9 @@ def make_parser():
     parser.add_argument("--evaluate_only", action="store_true")
 
     parser.add_argument("--git_status", action="store_true")
+
+    parser.add_argument("--num_shards", type=int, default=10)
+    parser.add_argument("--shard_number", type=int, default=-1)
 
     return parser
 
