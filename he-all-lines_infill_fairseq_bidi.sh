@@ -11,7 +11,7 @@ shift
 
 name="cm-6B-armen_last_bidi-gen_pyprefix_ncg-${num_candidates}_temp-${temperature}_${suffix}"
 outdir="expts/he_infill_all/${name}"
-outdir=${outdir}/shard_${shard}
+#outdir=${outdir}/shard_${shard}
 
 mkdir -p $outdir
 
@@ -30,4 +30,4 @@ python infill_evaluation.py \
   --prompt_prefix "<| file ext=.py |>" \
   --shard_number $shard \
   $@ \
-  | tee ${outdir}/log.out
+  | tee ${outdir}/log_shard-${shard}.out

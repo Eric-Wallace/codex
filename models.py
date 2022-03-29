@@ -202,7 +202,8 @@ class Model:
                 print(f"--infill (truncated):--\n{text}")
                 print(f"--infill (untruncated):--\n{text_untruncated}")
                 print(f"--suffix:--\n{suffix}")
-                print(f"--decoded ids:--\n{self._decode(choice['ids'])}")
+                if 'ids' in choice:
+                    print(f"--decoded ids:--\n{self._decode(choice['ids'])}")
 
             def maybe_append_newline(s):
                 if not s.endswith("\n"):
@@ -431,7 +432,12 @@ class FairseqModel(Model):
 
         i = 0
         while len(all_scores) < len(tokens_batch):
-            subbatch = tokens_batch[i:i+self.batch_size]
+            subbatch = []
+            for seq in tokens_batch[i:i+self.batch_size]:
+                if len(seq) > 2047:
+                    print(f"long sample with length {len(seq)}; truncating")
+                    seq = seq[:2047]
+                subbatch.append(seq)
             i += self.batch_size
             ret_vals = self.lm_model.generate(subbatch, score_reference=True, temperature=1.0)
             for ret_val in ret_vals:

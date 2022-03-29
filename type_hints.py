@@ -161,7 +161,6 @@ class TypeHintRemover(ast.NodeTransformer):
             return None
         return node
 
-
 def derive_prefix_suffix(original_source: str, removed_value: str):
     index = original_source.find(removed_value, 0)
     while index >= 0:
@@ -180,6 +179,16 @@ def normalize_type(type_, requires_parse=True) -> str:
     else:
         parsed = type_
     return astunparse.unparse(parsed).strip()
+
+def get_returns(function_body):
+    lines = function_body.splitlines()
+    split_lines = [line.strip().split() for line in lines]
+    returns = [toks for toks in split_lines if toks and toks[0] == 'return']
+    return returns
+
+def get_non_none_returns(function_body):
+    returns = get_returns(function_body)
+    return [ret for ret in returns if len(ret) > 1 and ret[1:] != ['None']]
 
 def create_return_example(source: str, lineno: int, return_type: Optional[str], imports_and_function=True):
     # pass None for return_type if the type is unknown to not require a type match (@@UNK@@ in the typewriter data)

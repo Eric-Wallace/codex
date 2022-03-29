@@ -14,7 +14,7 @@ import pprint
 
 from models import Model, TruncationParameters, add_model_args, add_infilling_args, make_model
 
-from type_hints import create_return_example, normalize_type
+from type_hints import create_return_example, normalize_type, get_non_none_returns
 
 import zstandard as zstd
 
@@ -278,6 +278,13 @@ def get_typewriter_predictions(examples):
         all_results.append(result)
     return all_results
 
+def force_none_for_no_returns(instance):
+    non_none_returns = get_non_none_returns(instance['right'])
+    if len(non_none_returns) == 0:
+        instance = instance.copy()
+        instance['predicted_type'] = 'None'
+    return instance
+
 def evaluate(results, verbose=False, type_from_source=True):
     # pass type_from_source = False if running on all predictions from Typewriter (which include files for which we don't have source)
     # the method should give the same results for type_from_source=False and type_from_source=True (if it doesn't throw an error for missing source, with type_from_source=True)
@@ -357,6 +364,8 @@ def make_parser():
 
     parser.add_argument("--full_file", action="store_true")
 
+    parser.add_argument("--force_none_for_no_returns", action="store_true")
+
     return parser
 
 if __name__ == "__main__":
@@ -393,6 +402,9 @@ if __name__ == "__main__":
         
         if args.eval_typewriter:
             results = get_typewriter_predictions(results)
+
+        if args.force_none_for_no_returns:
+            results = [force_none_for_no_returns(result) for result in results]
         
         if len(results) != len(examples):
             print(f"warning: {len(examples)} examples but {len(results)} results")

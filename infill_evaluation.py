@@ -8,6 +8,7 @@ import tqdm
 import os
 import sys
 import pprint
+import glob
 
 import argparse
 
@@ -16,6 +17,13 @@ from typing import List
 from models import TruncationParameters, add_infilling_args, add_model_args, make_model, Model
 
 from he import HUMAN_EVAL_STOP_WORDS, generate_he_infill_problems
+
+def make_shard_string(shard_number, num_shards):
+    if shard_number is None or shard_number < 0:
+        return ""
+    assert 0 <= shard_number < num_shards
+    shard_string = f"_shard-{shard_number}-of-{num_shards}"
+    return shard_string
 
 def run_systematic_infill(args, model: Model, eval_type="one_line", result_base_path=None):
     """Masks out a subset of lines in the HumanEval reference solution and infills with the CM model. Saves the output to a file for later evaluation.
@@ -32,8 +40,7 @@ def run_systematic_infill(args, model: Model, eval_type="one_line", result_base_
     problem_iterator = list(generate_he_infill_problems(args, eval_type))
 
     if args.shard_number is not None and args.shard_number >= 0:
-        assert 0 <= args.shard_number < args.num_shards
-        shard_string = f"_shard-{args.shard_number}-of-{args.num_shards}"
+        shard_string = make_shard_string(args.shard_number, args.num_shards)
         shard_size = (len(problem_iterator) // args.num_shards) + 1
         shard_start = shard_size * args.shard_number
         shard_end = min(shard_start + shard_size, len(problem_iterator))
@@ -131,6 +138,7 @@ def run_systematic_infill(args, model: Model, eval_type="one_line", result_base_
 
                 functional_results.append(eval_result(
                     task_id, humaneval_problem, args.truncation_heuristics, infill_result,
+                    override_suffix=args.override_suffix,
                 ))
 
             with open(response_pkl_fname, "wb") as f:
@@ -152,13 +160,23 @@ def run_systematic_infill(args, model: Model, eval_type="one_line", result_base_
 
     result_json.close()
 
-def eval_result(task_id, problem, truncation_heuristics, infill_result):
+def eval_result(task_id, problem, truncation_heuristics, infill_result, override_suffix=False):
     prefix, suffix = infill_result["prompt_parts"]
-    truncation_parameters = TruncationParameters.from_heuristics(truncation_heuristics, infill_result["missing_lines"], suffix)
-    infill_truncated = truncation_parameters.truncate(infill_result["text_untruncated"])
+    if override_suffix:
+        assert truncation_heuristics == []
+        _truncated_for_match = TruncationParameters.from_heuristics(["num_lines"], infill_result["missing_lines"], suffix).truncate(infill_result["text_untruncated"])
+        is_exact_match = _truncated_for_match.rstrip() == infill_result["missing_lines"].rstrip()
+    else:
+        truncation_parameters = TruncationParameters.from_heuristics(truncation_heuristics, infill_result["missing_lines"], suffix)
+        infill_truncated = truncation_parameters.truncate(infill_result["text_untruncated"])
     # TODO: this strips initial whitespace. could check whether indent is correct?
-    is_exact_match = infill_truncated.rstrip() == infill_result["missing_lines"].rstrip()
-    complete = "\n".join([prefix, infill_truncated, suffix])
+        is_exact_match = infill_truncated.rstrip() == infill_result["missing_lines"].rstrip()
+
+    if override_suffix:
+        to_join = [prefix, infill_result["text_untruncated"]]
+    else:
+        to_join = [prefix, infill_truncated, suffix]
+    complete = "\n".join(to_join)
     res = check_correctness(problem=problem, completion=complete, timeout=3.0, include_prompt=False)
     return {
         "task_id": task_id,
@@ -168,12 +186,33 @@ def eval_result(task_id, problem, truncation_heuristics, infill_result):
         "exact_match": is_exact_match, 
     }
 
-def evaluate_systematic(filename: str, truncation_heuristics: List[str] = ["num_lines"]):
+def evaluate_systematic(args):
     """Reads infilled completions from a file, postprocesses them (truncates them to one line or multi-line w/ heuristics),
     and evaluates functional correctness (average pass rate / exact match).
     """
 
-    outputs = read_file(filename)
+    result_base_path = args.result_base_path
+    num_shards = args.num_shards
+    truncation_heuristics = args.truncation_heuristics
+
+    outputs = []
+    task_ids = set()
+    if os.path.exists(f"{result_base_path}.pkl"):
+        paths = [f"{result_base_path}.pkl"]
+    else:
+        paths = glob.glob(f"{result_base_path}_shard-*-of-{num_shards}.pkl")
+        assert len(paths) == num_shards
+    
+    for filename in paths:
+        this_outputs = read_file(filename)
+        for output in this_outputs:
+            task_id = output["task_id"] 
+            assert task_id not in task_ids, f"task id {task_id} already present"
+            task_ids.add(task_id)
+            outputs.append(output)
+    
+    print(f"loaded {len(outputs)} outputs from {len(paths)} files")
+
     problems = read_problems()
 
     functional_results = []
@@ -190,6 +229,7 @@ def evaluate_systematic(filename: str, truncation_heuristics: List[str] = ["num_
                 humaneval_problem = problems[task_id]
                 functional_results.append(eval_result(
                     task_id, humaneval_problem, truncation_heuristics, infill_result,
+                    override_suffix=args.override_suffix,
                 ))
 
     avg_pass = np.mean([x["passed"] for x in functional_results])
@@ -198,8 +238,11 @@ def evaluate_systematic(filename: str, truncation_heuristics: List[str] = ["num_
     print("average pass:", avg_pass)
     print("average exact:", avg_exact)
 
-    ext_stripped = os.path.splitext(filename)[0]
-    with open(f"{ext_stripped}__functional_eval.json", "w") as f:
+    ext_stripped = os.path.splitext(result_base_path)[0]
+    file_suffix = '-'.join(truncation_heuristics)
+    if args.override_suffix:
+        file_suffix += "_override-suffix"
+    with open(f"{ext_stripped}__functional_eval_{file_suffix}.json", "w") as f:
         json.dump(functional_results, f)
 
 def make_parser():
@@ -209,12 +252,14 @@ def make_parser():
 
     parser.add_argument("--result_base_path")
     parser.add_argument("--eval_type", choices=["one_line", "all_lines"], default="one_line")
+    parser.add_argument("--override_suffix", action="store_true", help="replace the suffix with whatever text is generated by the model")
     parser.add_argument("--evaluate_only", action="store_true")
 
     parser.add_argument("--git_status", action="store_true")
 
     parser.add_argument("--num_shards", type=int, default=10)
     parser.add_argument("--shard_number", type=int, default=-1)
+
 
     return parser
 
@@ -231,4 +276,5 @@ if __name__ == "__main__":
     if not args.evaluate_only:
         model = make_model(args)
         run_systematic_infill(args, model, eval_type=args.eval_type, result_base_path=args.result_base_path)
-    evaluate_systematic(f"{args.result_base_path}.pkl", truncation_heuristics=args.truncation_heuristics)
+    shard_string = make_shard_string(args.shard_number, args.num_shards)
+    evaluate_systematic(args)

@@ -26,6 +26,7 @@ out_dir=expts/he/${model_name}_last_pg_ncg-${ncg}_temp-${temperature}/${name}
 mkdir -p $out_dir
 
 python -u he.py \
+  --git_status \
   --model_name $model \
   --num_candidates_generated ${ncg} \
   --num_candidates_evaluated 1 \
