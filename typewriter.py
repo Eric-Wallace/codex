@@ -365,6 +365,7 @@ def make_parser():
     parser.add_argument("--full_file", action="store_true")
 
     parser.add_argument("--force_none_for_no_returns", action="store_true")
+    parser.add_argument("--skip_none_type", action="store_true")
 
     return parser
 
@@ -405,6 +406,9 @@ if __name__ == "__main__":
 
         if args.force_none_for_no_returns:
             results = [force_none_for_no_returns(result) for result in results]
+
+        if args.skip_none_type:
+            results = [result for result in results if result["true_type"] != "None"]
         
         if len(results) != len(examples):
             print(f"warning: {len(examples)} examples but {len(results)} results")
