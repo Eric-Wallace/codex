@@ -81,8 +81,8 @@ def build_docstring_infill_prompt(code: str,
     else:
         function_def = code[:code.index(":") + 1]
         body = code[code.index(":") + 1:]
-        prompt_prefix = f"{function_def}\n{SPACES4}{TRIPLE_QUOTE}"
-        prompt_suffix = "{TRIPLE_QUOTE}\n{body}"
+        prompt_prefix = f"{function_def}\n{SPACES4}{TRIPLE_QUOTE} "
+        prompt_suffix = " {TRIPLE_QUOTE}\n{body}"
 
     if standardize_docstring:
         prompt_prefix, prompt_suffix = standardize_docstring_prompt(prompt_prefix, prompt_suffix)

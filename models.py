@@ -51,10 +51,10 @@ class TruncationParameters(_TruncationParameters):
         infill_truncated = infill
         if self.suffix is not None:
             infill_truncated = truncate_overlap(infill, self.suffix, minimum_num_suffix_lines=self.SUFFIX_NUM_CONSECUTIVE_LINES)
-        if self.max_num_lines is not None:
-            infill_truncated = truncate_num_lines(infill_truncated, max_num_lines=self.max_num_lines)
         if self.is_docstring_infill:
             infill_truncated = truncate_docstring_infill(infill_truncated)
+        if self.max_num_lines is not None:
+            infill_truncated = truncate_num_lines(infill_truncated, max_num_lines=self.max_num_lines)
         if self.stop_words is not None:
             stop_index = None
             for stop_token in self.stop_words:

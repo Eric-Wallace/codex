@@ -61,14 +61,14 @@ def run_codexglue_code_to_text(args, model: Model, result_base_path=None, split=
             try:
                 prompt_parts = problem["prompt_parts"]
                 truncation_parameters = [
-                        TruncationParameters.from_heuristics(args.truncation_heuristics)
+                        TruncationParameters.from_heuristics(args.truncation_heuristics + ["num_lines"], missing_lines="hack to force a single line")
                     ]
                 kwargs = dict(
                     verbose=False, n=args.num_candidates,
                     bidirectional_generation=args.bidirectional_generation, bidirectional_scoring=args.bidirectional_scoring,
                     truncation_parameters=truncation_parameters,
                     scoring=args.candidate_scoring,
-                    stop_words=['"""', '    """'] # these are both their own tokens
+                    stop_words=['"""', '    """'] # triple quote strings are both their own unique tokens
                 )
                 if args.max_tokens is not None:
                     kwargs['max_tokens'] = args.max_tokens
