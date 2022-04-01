@@ -94,28 +94,35 @@ def score(model, args, pre, suf, token):
     for lower in range(itok+eps, -1, -1):
         if len(model._decode(ecomp[:lower])) <= len(pre):
             break
+    lower = max(0, lower - args.leftpad)
+    upper = min(len(ecomp), upper + args.rightpad)
+    print(lower, upper)
     
     if not token in model._decode(ecomp[lower:upper]):
-        print(model._decode(ecomp[:lower]))
-        print(upper, lower)
-        print(len(token))
         print('tok', model._decode(ecomp[lower:upper]))
-        print(model._decode(ecomp[upper:]))
         raise Exception('shouldnt happen, didnt find anything containing the token...')
 
     if args.score_method == 'inf':
-        lower = max(0, lower - args.leftpad)
-        upper = min(len(ecomp), upper + args.rightpad)
-        print(lower, upper)
         seq = ecomp[:lower] + esl('<sentinel:0>') + ecomp[upper:] + esl('<sentinel:1>') + esl('<sentinel:0>') + ecomp[lower:upper] + esl('<eoss>')
     elif args.score_method == 'lr':
-        # seq = ecomp[:lower] + ecomp[lower:upper] + ecomp[upper:]
+        seq = ecomp[:lower] + ecomp[lower:upper] + ecomp[upper:]
         # seq = epre + etoksuf 
-        seq = epre + esl('<sentinel:0>') + etoksuf[1:] + esl('<sentinel:1>') + esl('<sentinel:0>') + etoksuf[:1] + esl('<eoss>')
+        # seq = epre + esl('<sentinel:0>') + etoksuf[1:] + esl('<sentinel:1>') + esl('<sentinel:0>') + etoksuf[:1] + esl('<eoss>')
+    elif args.score_method == 'gen':
+        seqg = ecomp[:lower] + esl('<sentinel:0>') + ecomp[upper:] + esl('<sentinel:1>') + esl('<sentinel:0>') 
+        for f in model._generate(torch.tensor(seqg), 2, n=3, temperature=1, extra_encoded_stop_words=[esl('<eoss>')]):
+            words, probs, flag = f
+            print('pre\t', model._decode(ecomp[:lower]))
+            print('suf\t', model._decode(ecomp[upper:]))
+            print('tok\t', model._decode(ecomp[lower:upper]))
+            print('g\t', model._decode(words))
     else:
         raise Exception('invalid score mode', args.score_method)
+    return model.score_tokens([torch.tensor(seq)])[0] 
     # print(model._decode(seq))
-    return model.score_tokens([torch.tensor(seq)])[0]   
+
+    
+    return model.score_tokens([torch.tensor(seq)])[0] 
     # print(model._decode(seq))
 
 
@@ -147,7 +154,7 @@ def cloze_test(args, lang, model):
     lines = json.load(open(file_path))
     results = []
     words = get_cloze_words(cloze_words_file)
-    for line in tqdm.tqdm(lines):
+    for line in tqdm.tqdm(lines[:10]):
         # text = ' '.join(line['nl_tokens']) + ''.join(line['pl_tokens'])
         text = ' '.join(line['nl_tokens']) + funtokenize(line['pl_tokens'])
         # print('*' * 100)
@@ -169,7 +176,7 @@ def cloze_test(args, lang, model):
 
     dir = os.path.join(args.output_dir, lang)
     if not os.path.exists(dir):
-        os.mkdir(dir)
+        os.makedirs(dir)
     with open(os.path.join(dir, 'predictions.txt'), 'w', encoding='utf-8') as fp:
         for inst in results:
             fp.write(inst['idx']+'<CODESPLIT>'+inst['prediction']+'\n')
