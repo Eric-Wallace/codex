@@ -179,7 +179,7 @@ def build_examples(typewriter_dir: str, crawl_root: str, imports_and_function_on
     print(f"return: skipped {sum(skip_reasons.values())} / {len(result_predictions)} examples ({len(return_examples)} remaining)")
     return return_examples
 
-def run_return_prediction(args, examples, model: Model, result_base_path=None):
+def run_return_prediction(args, examples, model: Model, result_base_path=None, taskname="typewriter"):
     all_results = []
     responses = {}
 
@@ -200,8 +200,8 @@ def run_return_prediction(args, examples, model: Model, result_base_path=None):
         result_pkl_fname = f"{result_base_path}{shard_string}.pkl"
         response_pkl_fname = f"{result_base_path}{shard_string}_responses.pkl"
     else:
-        result_pkl_fname = f"typewriter{shard_string}.pkl"
-        response_pkl_fname = f"typewriter{shard_string}.pkl"
+        result_pkl_fname = f"{taskname}{shard_string}.pkl"
+        response_pkl_fname = f"{taskname}{shard_string}.pkl"
 
     indices = list(range(shard_start, shard_end))
     with tqdm.tqdm(indices, ncols=120) as pbar:

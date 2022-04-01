@@ -190,9 +190,13 @@ def get_non_none_returns(function_body):
     returns = get_returns(function_body)
     return [ret for ret in returns if len(ret) > 1 and ret[1:] != ['None']]
 
-def create_return_example(source: str, lineno: int, return_type: Optional[str], imports_and_function=True):
+def create_return_example(source: str, lineno: Optional[int], return_type: Optional[str], imports_and_function=True):
     # pass None for return_type if the type is unknown to not require a type match (@@UNK@@ in the typewriter data)
-    wrapper = cst.MetadataWrapper(cst.parse_module(source))
+    try:
+        wrapper = cst.MetadataWrapper(cst.parse_module(source))
+    except Exception as e:
+        print(e)
+        return None
     position = wrapper.resolve(cst.metadata.PositionProvider)
     parsed_source = wrapper.module
     def match_with_line_and_type(function, returns):
@@ -200,7 +204,7 @@ def create_return_example(source: str, lineno: int, return_type: Optional[str], 
         return_lineno = position[returns].start.line
         this_return_type = parsed_source.code_for_node(returns.annotation)
         matches_type = (return_type is None) or normalize_type(this_return_type, requires_parse=True) == normalize_type(return_type, requires_parse=True)
-        matches_line = (lineno == return_lineno) or (lineno == function_lineno) or (lineno == function_lineno-2) or (lineno == function_lineno-1)
+        matches_line = (lineno is None) or (lineno == return_lineno) or (lineno == function_lineno) or (lineno == function_lineno-2) or (lineno == function_lineno-1)
         return matches_type and matches_line
     processor = TypeHintKeepOnlyTargetedFormatPreserving(['return'], match_with_line_and_type)
     # remove the type annotations, except for the target
@@ -212,9 +216,9 @@ def create_return_example(source: str, lineno: int, return_type: Optional[str], 
         return None
 
     if len(processor.matches) != 1:
-        print(f"{len(processor.matches)} matches found!")
-        print(f"return_type: {return_type}")
-        print('\n'.join(source.splitlines()[lineno-1:lineno+2]))
+        # print(f"{len(processor.matches)} matches found!")
+        # print(f"return_type: {return_type}")
+        # print('\n'.join(source.splitlines()[lineno-1:lineno+2]))
         return None
 
     return_type_from_source = transformed_parsed_source.code_for_node(processor.matches[0]['returns'].annotation)
