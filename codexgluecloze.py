@@ -30,7 +30,8 @@ def add_cloze_args(parser):
     parser.add_argument('--score_method', default='inf', help='"inf or lr mode')
     parser.add_argument('--output_dir', default='./evaluator/predictions/', help='directory to save output predictions')
     parser.add_argument('--cloze_path', default='/private/home/sida/extgit/CodeXGLUE/Code-Code/ClozeTesting-maxmin/')
-    
+    parser.add_argument('--leftpad', default=10, help='# tokens to pad the lhs of the infill pad', type=int)
+    parser.add_argument('--rightpad', default=10, help='# tokens to pad the rhs of the infill', type=int)
 
 def get_cloze_words(filename):
     with open(filename, 'r', encoding='utf-8') as fp:
@@ -54,33 +55,27 @@ def score_token_infill(model, parts, token, top_p=1, max_tokens=2):
     prompt.append(self.sentinel_id(0))
     prompt.extend(self._encode(token, strip_eos=True).tolist())
     prompt.append(self.EOSS_ID)
-    
-#     stop_words = self._extra_stop_words
-#     encoded_stop_words = [self._encode(stop_word, strip_eos=True).tolist() for stop_word in stop_words]
-#     encoded_stop_words.append([self.EOSS_ID])
-#     with torch.no_grad():
-#         for completion, scores in self._generate(
-#             torch.tensor(prompt),
-#             max_tokens=max_tokens,
-#             top_p=top_p,
-#             n=1,
-#             temperature=0.1,
-#             # extra_encoded_stop_words=encoded_stop_words,
-#         ):
-#             print(completion, scores)
-#             print(model._decode(completion))
-
-    # print(model._decode(torch.tensor(prompt)))
-    # print(self.sentinel_id(0))
     return model.score_tokens([torch.tensor(prompt)])
 
 def esl(text):
     return model._encode(text, strip_eos=True).tolist()
 
+def score_hard(model, args, pre, suf, token):
+    if args.score_method == 'inf':
+        seq = esl(pre) + esl('<sentinel:0>') + esl(suf) + esl('<sentinel:1>') + esl('<sentinel:0>') + esl(token) + esl('<eoss>')
+    elif args.score_method == 'lr':
+        seq = esl(pre) + esl(token) + esl(suf)
+    else:
+        raise Exception('invalid score mode', args.score_method)
+    # print(model._decode(seq))
+    return model.score_tokens([torch.tensor(seq)])[0]
+
 def score(model, args, pre, suf, token):
     """
     find the largest span containing the given token and score it using the infilling model
     """
+    if args.score_method == 'codex':
+        return model.score_text([pre + token + suf], scoring='sum') 
 
     ecomp = esl(pre + token + suf)
     epre = esl(pre)
@@ -88,7 +83,7 @@ def score(model, args, pre, suf, token):
     etoksuf = esl(token + suf)
     esuf= esl(suf)
     etok = esl(token)
-    assert(len(etok) == 1)
+    assert(len(etok) == 1)  
     itok = len(epretok) - 1
     
     eps = len(etok) + 1 
@@ -109,9 +104,14 @@ def score(model, args, pre, suf, token):
         raise Exception('shouldnt happen, didnt find anything containing the token...')
 
     if args.score_method == 'inf':
+        lower = max(0, lower - args.leftpad)
+        upper = min(len(ecomp), upper + args.rightpad)
+        print(lower, upper)
         seq = ecomp[:lower] + esl('<sentinel:0>') + ecomp[upper:] + esl('<sentinel:1>') + esl('<sentinel:0>') + ecomp[lower:upper] + esl('<eoss>')
     elif args.score_method == 'lr':
-        seq = ecomp[:lower] +  + ecomp[lower:upper] + ecomp[upper:]
+        # seq = ecomp[:lower] + ecomp[lower:upper] + ecomp[upper:]
+        # seq = epre + etoksuf 
+        seq = epre + esl('<sentinel:0>') + etoksuf[1:] + esl('<sentinel:1>') + esl('<sentinel:0>') + etoksuf[:1] + esl('<eoss>')
     else:
         raise Exception('invalid score mode', args.score_method)
     # print(model._decode(seq))
@@ -122,28 +122,27 @@ def score(model, args, pre, suf, token):
 def funtokenize(toks):
     """hacky tokenize to convert tokens back to python string that looks more like data"""
     out = ' '
+    import keyword
     for t in toks:
         if len(t) == 0:
             out += ' '
-            continue
         elif out[-1].isalnum() and t[0].isalnum():
             out += ' ' + t
-        elif t == ':':
-            out += ':\n'
-        elif out[-1]==')' and t[0].isalnum():
-            out += '\n'
-            out += t
-        elif t == ',':
-            out += ', '
+        # elif t == ':':
+        #     out += ':\n'
+        # elif out[-1]==')' and t[0].isalnum():
+        #     out += ' '
+        #     out += t
+        # elif t == ',':
+        #     out += ', '
         else:
             out += t
             
     return out
 
 def cloze_test(args, lang, model):
-    os.chdir(args.cloze_path)
-    cloze_words_file = os.path.join('./data', 'cloze-'+args.cloze_mode, 'cloze_test_words.txt')
-    file_path = os.path.join('./data', 'cloze-'+args.cloze_mode, lang, 'clozeTest.json')
+    cloze_words_file = os.path.join(args.cloze_path, './data', 'cloze-'+args.cloze_mode, 'cloze_test_words.txt')
+    file_path = os.path.join(args.cloze_path, './data', 'cloze-'+args.cloze_mode, lang, 'clozeTest.json')
 
     lines = json.load(open(file_path))
     results = []
@@ -152,18 +151,26 @@ def cloze_test(args, lang, model):
         # text = ' '.join(line['nl_tokens']) + ''.join(line['pl_tokens'])
         text = ' '.join(line['nl_tokens']) + funtokenize(line['pl_tokens'])
         # print('*' * 100)
-        if len(text) < 6000:
-            # scores = model.score_text([text.replace('<mask>', w) for w in words])
-            prefix, suffix = text.split('<mask>')
-            scores = [score(model, args, [prefix, suffix], w) for w in words]
-        else:
-            scores = [0] * len(words)
-            print(line['idx'], len(text))
+        prefix, suffix = text.split('<mask>')
+        MAX_LEN = 6000
+        if len(text) > MAX_LEN:
+            if len(prefix) > MAX_LEN/2:
+                prefix = prefix[-MAX_LEN//2:]
+            if len(suffix) > MAX_LEN/2:
+                suffix = suffix[:MAX_LEN//2] 
+
+        # scores = model.score_text([text.replace('<mask>', w) for w in words])
+        scores = [score(model, args, prefix, suffix, w) for w in words]
+
         maxind = np.argmax(scores)
         pred = words[maxind]
         results.append({'idx': line['idx'], 'prediction': pred})
 
-    with open(os.path.join(args.output_dir, lang, 'predictions.txt'), 'w', encoding='utf-8') as fp:
+
+    dir = os.path.join(args.output_dir, lang)
+    if not os.path.exists(dir):
+        os.mkdir(dir)
+    with open(os.path.join(dir, 'predictions.txt'), 'w', encoding='utf-8') as fp:
         for inst in results:
             fp.write(inst['idx']+'<CODESPLIT>'+inst['prediction']+'\n')
     print("ClozeMaxmin for {} finished".format(lang))
@@ -203,11 +210,11 @@ def calculate_scores(answers, predictions):
 
 def print_results(args):
     for lang in ['python', 'javascript', 'ruby', 'go',  'java', 'php']:
-    # for lang in ['python', 'javascript']:
+    # for lang in ['javascript']:
         answers = read_answers(os.path.join(args.cloze_path, 'evaluator/answers/', lang, 'answers.txt'))
-        predictions = read_predictions(os.path.join(args.cloze_path, 'evaluator/predictions/', lang, 'predictions.txt'))
+        predictions = read_predictions(os.path.join(args.output_dir, lang, 'predictions.txt'))
         acc = calculate_scores(answers, predictions)
-        print('maxmin:{}\t {:.3f}'.format(lang, acc))
+        print('{}, {:.3f}'.format(lang, acc))
 
 
 if __name__ == "__main__":
@@ -223,7 +230,7 @@ if __name__ == "__main__":
 
     model = make_model(args)
     for lang in ['python', 'javascript', 'ruby', 'go',  'java', 'php']:
-    # for lang in ['ruby']:
+    # for lang in ['javascript']:
         cloze_test(args, lang, model)
 
     print_results(args)
