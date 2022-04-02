@@ -444,12 +444,14 @@ class FairseqModel(Model):
                 assert len(ret_val) == 1
                 log_probs = ret_val[0]['positional_scores']
                 if scoring == 'sum':
-                    score = log_probs.sum()
+                    score = log_probs.sum().item()
                 elif scoring == 'mean':
-                    score = log_probs.mean()
+                    score = log_probs.mean().item()
+                elif scoring == 'unreduced':
+                    score = log_probs
                 else:
                     raise NotImplementedError(f"scoring {scoring}")
-                all_scores.append(score.item())
+                all_scores.append(score)
         return all_scores
 
     def _generate(self, encoded_prompt: torch.tensor, max_tokens, top_p=0.95, n=1, temperature=0.6, extra_encoded_stop_words=None, all_must_complete=True):

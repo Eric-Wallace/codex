@@ -56,9 +56,8 @@ class DecodingBase(nn.Module):
         self.temperature = temperature
         self.dummy_param = nn.Parameter(torch.empty(0))
         self.show_tqdm = show_tqdm
-        self.clear_cache()
 
-    def decode_multiple_candidates(self, prefix: torch.Tensor, num_candidates: int = 1, encoded_stop_words: Optional[List[List[int]]] = None, all_must_complete=True, incremental_states=None, return_incremental_states=False):
+    def decode_multiple_candidates(self, prefix: torch.Tensor, num_candidates: int = 1, encoded_stop_words: Optional[List[List[int]]] = None, all_must_complete=True, incremental_states=None, return_incremental_states=False, compute_start_step=None):
         """
         returns: (tokens, token_logprobs)
         tokens: (batch_size x max_seq_length) LongTensor
@@ -77,7 +76,7 @@ class DecodingBase(nn.Module):
                 prefix = torch.cat(
                     [torch.tensor([self.eos]).to(prefix), prefix])
             prefix_len: int = prefix.size(0)
-            assert prefix_len < self.max_len, "Max len is smaller than prefix length"
+            assert prefix_len <= self.max_len, "Max len is smaller than prefix length"
 
             src_tokens = prefix
             # length of the source text being the character length except EndOfSentence and pad
@@ -90,6 +89,9 @@ class DecodingBase(nn.Module):
             if encoder_out is not None:
                 encoder_out = encoder_out.view(num_candidates, -1, -1)
 
+            if compute_start_step is not None:
+                assert incremental_states is not None and compute_start_step <= prefix_len
+
             if incremental_states is None:
                 incremental_states = torch.jit.annotate(
                     Dict[str, Dict[str, Optional[torch.Tensor]]],
@@ -97,12 +99,28 @@ class DecodingBase(nn.Module):
                         Dict[str, Dict[str, Optional[torch.Tensor]]], {})
                 )
                 start_step = 1
+                def filtered_incremental(step):
+                    return incremental_states
             else:
                 # incremental states are bsz x d1 x prev_timesteps x d2
                 cached_size = next(iter(incremental_states.values()))['prev_key'].size()
                 assert len(cached_size) == 4
-                # we can start decoding at the next timestep
-                start_step = cached_size[2] + 1
+                num_cached_steps = cached_size[2]
+                if compute_start_step is None:
+                    start_step = num_cached_steps
+                else:
+                    compute_start_step = start_step
+                def filtered_incremental(step):
+                    if step >= num_cached_steps:
+                        # need to return original dict because it will be updated
+                        return incremental_states
+                    return {
+                        k1: {
+                            k2: t[:,:,:step] if t is not None and step > 0 else None
+                            for k2, t in d.items()
+                        } for k1, d in incremental_states.items()
+                    }
+
             tokens = (
                 torch.zeros(num_candidates, self.max_len)
                 .to(src_tokens)
@@ -129,7 +147,7 @@ class DecodingBase(nn.Module):
                 decoder_out = self.model.decoder.forward(
                     tokens[:, :step],
                     encoder_out=encoder_out,
-                    incremental_state=incremental_states,
+                    incremental_state=filtered_incremental(step),
                 )
                 logprobs, _ = unpack_decoder_out(
                     self.model, decoder_out, self.temperature)
@@ -139,9 +157,8 @@ class DecodingBase(nn.Module):
                 else:
                     for candidate_ix in range(num_candidates):
                         candidate_lps = logprobs[candidate_ix]
-                        token = self.choice(candidate_lps)
+                        token = self.choice(candidate_lps, step)
                         tokens[candidate_ix, step] = token
-                        token_log_probs[candidate_ix, step] = candidate_lps[token]
                         candidate_found_stop = False
                         for esw in encoded_stop_words:
                             if tokens[candidate_ix, step+1-len(esw):step+1].tolist() == esw:
@@ -149,6 +166,10 @@ class DecodingBase(nn.Module):
                                     print(f"warning: stopping on {token.item()} at step {step} within prefix {prefix}")
                                 candidate_found_stop = True
                         found_stop[candidate_ix] |= candidate_found_stop
+                for candidate_ix in range(num_candidates):
+                    token = tokens[candidate_ix, step]
+                    candidate_lps = logprobs[candidate_ix]
+                    token_log_probs[candidate_ix, step] = candidate_lps[token]
                 if (all_must_complete and found_stop.all()) or ((not all_must_complete) and found_stop.any()):
                     tokens = tokens[:, :step+1]
                     token_log_probs = token_log_probs[:, :step+1]
@@ -168,21 +189,35 @@ class DecodingBase(nn.Module):
         else:
             return tokens.squeeze(0)
 
-    def choice(self, logprob: torch.Tensor) -> int:
+    def choice(self, logprob: torch.Tensor, step: int) -> int:
         raise NotImplementedError
 
 
 class GreedyDecoding(DecodingBase):
-    def choice(self, logprob: torch.Tensor) -> int:
+    def choice(self, logprob: torch.Tensor, step: int) -> int:
         return torch.argmax(logprob)
 
+class TeacherForcing(DecodingBase):
+    def __init__(self, transformer_language_model: GeneratorHubInterface, tokens: torch.LongTensor, show_tqdm=True):
+        super().__init__(transformer_language_model, None, None, 1.0, show_tqdm)
+        tokens = tokens.squeeze()
+        assert tokens.ndim == 1 and tokens.size(0) > 0
+        if tokens[0] != self.eos:
+            tokens = torch.cat(
+                [torch.tensor([self.eos]).to(tokens), tokens]).flatten()
+        self.min_len = 1
+        self.max_len = tokens.size(0)
+        self.forcing_tokens = tokens
+    
+    def choice(self, logprob: torch.Tensor, step: int):
+        return self.forcing_tokens[step]
 
 class TopPSampling(DecodingBase):
     def __init__(self, transformer_language_model: GeneratorHubInterface, min_len: int, max_len: int, sampling_topp: float, temperature: float = 1.0, show_tqdm=True):
         super().__init__(transformer_language_model, min_len, max_len, temperature, show_tqdm)
         self.sampling_topp = sampling_topp
 
-    def choice(self, logprob: torch.Tensor) -> int:
+    def choice(self, logprob: torch.Tensor, step: int) -> int:
         probs = logprob.exp_()
         sorted_probs, sorted_indices = probs.sort(descending=True)
 
@@ -219,7 +254,7 @@ class TopKSampling(DecodingBase):
         super().__init__(transformer_language_model, min_len, max_len, temperature)
         self.sampling_topk = sampling_topk
 
-    def choice(self, logprob: torch.Tensor) -> int:
+    def choice(self, logprob: torch.Tensor, step: int) -> int:
         lprobs, top_indices = logprob.topk(self.sampling_topk)
         probs = lprobs.exp_()
         indices_buf = torch.multinomial(
