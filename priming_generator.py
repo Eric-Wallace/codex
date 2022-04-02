@@ -56,8 +56,9 @@ class DecodingBase(nn.Module):
         self.temperature = temperature
         self.dummy_param = nn.Parameter(torch.empty(0))
         self.show_tqdm = show_tqdm
+        self.clear_cache()
 
-    def decode_multiple_candidates(self, prefix: torch.Tensor, num_candidates: int = 1, encoded_stop_words: Optional[List[List[int]]] = None, all_must_complete=True):
+    def decode_multiple_candidates(self, prefix: torch.Tensor, num_candidates: int = 1, encoded_stop_words: Optional[List[List[int]]] = None, all_must_complete=True, incremental_states=None, return_incremental_states=False):
         """
         returns: (tokens, token_logprobs)
         tokens: (batch_size x max_seq_length) LongTensor
@@ -89,11 +90,19 @@ class DecodingBase(nn.Module):
             if encoder_out is not None:
                 encoder_out = encoder_out.view(num_candidates, -1, -1)
 
-            incremental_states = torch.jit.annotate(
-                Dict[str, Dict[str, Optional[torch.Tensor]]],
-                torch.jit.annotate(
-                    Dict[str, Dict[str, Optional[torch.Tensor]]], {})
-            )
+            if incremental_states is None:
+                incremental_states = torch.jit.annotate(
+                    Dict[str, Dict[str, Optional[torch.Tensor]]],
+                    torch.jit.annotate(
+                        Dict[str, Dict[str, Optional[torch.Tensor]]], {})
+                )
+                start_step = 1
+            else:
+                # incremental states are bsz x d1 x prev_timesteps x d2
+                cached_size = next(iter(incremental_states.values()))['prev_key'].size()
+                assert len(cached_size) == 4
+                # we can start decoding at the next timestep
+                start_step = cached_size[2] + 1
             tokens = (
                 torch.zeros(num_candidates, self.max_len)
                 .to(src_tokens)
@@ -110,7 +119,7 @@ class DecodingBase(nn.Module):
 
             seq_lengths = torch.ones(num_candidates).to(src_tokens.device).long()
 
-            it = range(1, self.max_len)
+            it = range(start_step, self.max_len)
             if self.show_tqdm:
                 it = tqdm(it)
 
@@ -144,7 +153,10 @@ class DecodingBase(nn.Module):
                     tokens = tokens[:, :step+1]
                     token_log_probs = token_log_probs[:, :step+1]
                     break
-            return tokens, token_log_probs, seq_lengths, found_stop
+            if return_incremental_states:
+                return tokens, token_log_probs, seq_lengths, found_stop, incremental_states
+            else:
+                return tokens, token_log_probs, seq_lengths, found_stop
 
 
     def decode(self, prefix: Optional[torch.Tensor] = None, return_log_probs=False, encoded_stop_words: List[List[int]]=None) -> torch.Tensor:
