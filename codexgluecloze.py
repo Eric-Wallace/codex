@@ -33,6 +33,7 @@ def add_cloze_args(parser):
     parser.add_argument('--cloze_path', default='/private/home/sida/extgit/CodeXGLUE/Code-Code/ClozeTesting-maxmin/')
     parser.add_argument('--leftpad', default=10, help='# tokens to pad the lhs of the infill pad', type=int)
     parser.add_argument('--rightpad', default=10, help='# tokens to pad the rhs of the infill', type=int)
+    parser.add_argument('--breaktoken', action="store_true", help='break token on the infill')
 
 def get_cloze_words(filename):
     with open(filename, 'r', encoding='utf-8') as fp:
@@ -44,6 +45,9 @@ def esl(text):
 
 
 def expand(model, args, pre, suf, token):
+    if args.breaktoken:
+        return esl(pre), esl(suf), esl(token)
+        
     ecomp = esl(pre + token + suf)
     epre = esl(pre)
     epretok = esl(pre + token)
@@ -75,9 +79,6 @@ def build_seq(model, args, pre, suf, token):
     """
     find the largest span containing the given token and score it using the infilling model
     """
-    if args.score_method == 'codex':
-        return model.score_text([pre + token + suf], scoring='sum') 
-
     pret, suft, tokt = expand(model, args, pre, suf, token)
 
     if args.score_method == 'inf':
@@ -99,25 +100,31 @@ def build_seq(model, args, pre, suf, token):
 
 def cloze(model, args, pre, suf, options):
     mode = args.score_method
-    if mode in ['inf', 'left', 'lr']:
+    if mode in ['codex', 'codexleft']:
+        scores = []
+        for tok in options:
+            if mode == 'codex':
+                scores.append(model.score_text([pre + tok + suf], scoring='sum')) 
+            elif mode == 'codexleft':
+                scores.append(model.score_text([pre + tok], scoring='sum')) 
+    elif mode in ['inf', 'left', 'lr']:
         seqs = [torch.tensor(build_seq(model, args, pre, suf, w)) for w in options]
         scores = model.score_tokens(seqs)
-    elif mode == 'batch_inf':
-         from priming_scorer import Scorer
-         self = model
-         pret, suft, tokt = expand(model, args, pre, suf, options[0])
-         seq = pret + esl('<sentinel:0>') + suft + esl('<sentinel:1>') + esl('<sentinel:0>')
-         seq = torch.tensor(seq).to(self.lm_model.device)
-         print(len(seq), seq.size())
-         decoder = Scorer(self.lm_model, min_len=len(seq), max_len=len(seq)+2, temperature=1.0, show_tqdm=False)
-         decoder = decoder.to(self.lm_model.device)
-         probs = decoder.score(seq).cpu()
-         scores = []
-         for tok in options:
-             ind = model._encode(tok, strip_eos=True)
-             # print(tok, ind, probs[ind])
-             scores.append(probs[ind][0])
-
+    # elif mode == 'batch_inf':
+    #      from priming_scorer import Scorer
+    #      self = model
+    #      pret, suft, tokt = expand(model, args, pre, suf, options[0])
+    #      seq = pret + esl('<sentinel:0>') + suft + esl('<sentinel:1>') + esl('<sentinel:0>')
+    #      seq = torch.tensor(seq).to(self.lm_model.device)
+    #      print(len(seq), seq.size())
+    #      decoder = Scorer(self.lm_model, min_len=len(seq), max_len=len(seq)+2, temperature=1.0, show_tqdm=False)
+    #      decoder = decoder.to(self.lm_model.device)
+    #      probs = decoder.score(seq).cpu()
+    #      scores = []
+    #      for tok in options:
+    #          ind = model._encode(tok, strip_eos=True)
+    #          # print(tok, ind, probs[ind])
+    #          scores.append(probs[ind][0])
     maxind = np.argmax(scores)
     pred = options[maxind]
     return pred
