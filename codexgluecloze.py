@@ -2,11 +2,12 @@ import sys
 import argparse
 import pprint
 import pickle
-import tqdm
+from typing import List
 import logging
 import sys, json, os
-import numpy as np
 
+import numpy as np
+import tqdm
 import torch
 
 # from datasets import load_dataset
@@ -27,7 +28,7 @@ def make_parser():
 
 def add_cloze_args(parser):
     parser.add_argument('--cloze_mode', default='maxmin', help='"all" or "maxmin" mode')
-    parser.add_argument('--score_method', default='inf', help='"inf or lr mode')
+    parser.add_argument('--score_method', default='inf', help='"inf or lr or left mode')
     parser.add_argument('--output_dir', default='./evaluator/predictions/', help='directory to save output predictions')
     parser.add_argument('--cloze_path', default='/private/home/sida/extgit/CodeXGLUE/Code-Code/ClozeTesting-maxmin/')
     parser.add_argument('--leftpad', default=10, help='# tokens to pad the lhs of the infill pad', type=int)
@@ -38,52 +39,18 @@ def get_cloze_words(filename):
         words = fp.read().split('\n')
     return words
 
-def score_token_infill(model, parts, token, top_p=1, max_tokens=2):
-    self = model
-    prompt = []
-    # print(parts)
-    # print('-'*100)
-    for sentinel_ix, part in enumerate(parts):
-        part_tokens = self._encode(part, strip_eos=True)
-        prompt.extend(part_tokens.tolist())
-        if sentinel_ix < len(parts) - 1:
-            prompt.append(self.sentinel_id(sentinel_ix))
-        else:
-            # only makes sense to add an extra sentinel if we do have some text coming later, otherwise, we tend to just end the region immediately
-            if self.extra_sentinel and len(part) > 0:
-                prompt.append(self.sentinel_id(sentinel_ix))
-    prompt.append(self.sentinel_id(0))
-    prompt.extend(self._encode(token, strip_eos=True).tolist())
-    prompt.append(self.EOSS_ID)
-    return model.score_tokens([torch.tensor(prompt)])
-
 def esl(text):
     return model._encode(text, strip_eos=True).tolist()
 
-def score_hard(model, args, pre, suf, token):
-    if args.score_method == 'inf':
-        seq = esl(pre) + esl('<sentinel:0>') + esl(suf) + esl('<sentinel:1>') + esl('<sentinel:0>') + esl(token) + esl('<eoss>')
-    elif args.score_method == 'lr':
-        seq = esl(pre) + esl(token) + esl(suf)
-    else:
-        raise Exception('invalid score mode', args.score_method)
-    # print(model._decode(seq))
-    return model.score_tokens([torch.tensor(seq)])[0]
 
-def score(model, args, pre, suf, token):
-    """
-    find the largest span containing the given token and score it using the infilling model
-    """
-    if args.score_method == 'codex':
-        return model.score_text([pre + token + suf], scoring='sum') 
-
+def expand(model, args, pre, suf, token):
     ecomp = esl(pre + token + suf)
     epre = esl(pre)
     epretok = esl(pre + token)
     etoksuf = esl(token + suf)
     esuf= esl(suf)
     etok = esl(token)
-    assert(len(etok) == 1)  
+    # assert(len(etok) == 1)
     itok = len(epretok) - 1
     
     eps = len(etok) + 1 
@@ -96,35 +63,64 @@ def score(model, args, pre, suf, token):
             break
     lower = max(0, lower - args.leftpad)
     upper = min(len(ecomp), upper + args.rightpad)
-    print(lower, upper)
+    # print(lower, upper, model._decode(ecomp[lower:upper]))
     
     if not token in model._decode(ecomp[lower:upper]):
         print('tok', model._decode(ecomp[lower:upper]))
         raise Exception('shouldnt happen, didnt find anything containing the token...')
+    return ecomp[:lower], ecomp[upper:], ecomp[lower:upper]
+
+
+def build_seq(model, args, pre, suf, token):
+    """
+    find the largest span containing the given token and score it using the infilling model
+    """
+    if args.score_method == 'codex':
+        return model.score_text([pre + token + suf], scoring='sum') 
+
+    pret, suft, tokt = expand(model, args, pre, suf, token)
 
     if args.score_method == 'inf':
-        seq = ecomp[:lower] + esl('<sentinel:0>') + ecomp[upper:] + esl('<sentinel:1>') + esl('<sentinel:0>') + ecomp[lower:upper] + esl('<eoss>')
+        seq = pret + esl('<sentinel:0>') + suft + esl('<sentinel:1>') + esl('<sentinel:0>') + tokt + esl('<eoss>')
     elif args.score_method == 'lr':
-        seq = ecomp[:lower] + ecomp[lower:upper] + ecomp[upper:]
-        # seq = epre + etoksuf 
-        # seq = epre + esl('<sentinel:0>') + etoksuf[1:] + esl('<sentinel:1>') + esl('<sentinel:0>') + etoksuf[:1] + esl('<eoss>')
-    elif args.score_method == 'gen':
-        seqg = ecomp[:lower] + esl('<sentinel:0>') + ecomp[upper:] + esl('<sentinel:1>') + esl('<sentinel:0>') 
-        for f in model._generate(torch.tensor(seqg), 2, n=3, temperature=1, extra_encoded_stop_words=[esl('<eoss>')]):
-            words, probs, flag = f
-            print('pre\t', model._decode(ecomp[:lower]))
-            print('suf\t', model._decode(ecomp[upper:]))
-            print('tok\t', model._decode(ecomp[lower:upper]))
-            print('g\t', model._decode(words))
-    else:
-        raise Exception('invalid score mode', args.score_method)
-    return model.score_tokens([torch.tensor(seq)])[0] 
-    # print(model._decode(seq))
-
+        seq = pret + tokt + suft
+    elif args.score_method == 'left':
+        seq = pret + tokt
+    # elif args.score_method == 'gen':
+    #     seqg = pret + esl('<sentinel:0>') + suft + esl('<sentinel:1>') + esl('<sentinel:0>') 
+    #     for f in model._generate(torch.tensor(seqg), 2, n=3, temperature=1, extra_encoded_stop_words=[esl('<eoss>')]):
+    #         words, probs, flag = f
+    #         print('pre\t', model._decode(pret))
+    #         print('suf\t', model._decode(suft))
+    #         print('tok\t', model._decode(tokt))
+    #         print('g\t', model._decode(words))
     
-    return model.score_tokens([torch.tensor(seq)])[0] 
-    # print(model._decode(seq))
+    return seq
 
+def cloze(model, args, pre, suf, options):
+    mode = args.score_method
+    if mode in ['inf', 'left', 'lr']:
+        seqs = [torch.tensor(build_seq(model, args, pre, suf, w)) for w in options]
+        scores = model.score_tokens(seqs)
+    elif mode == 'batch_inf':
+         from priming_scorer import Scorer
+         self = model
+         pret, suft, tokt = expand(model, args, pre, suf, options[0])
+         seq = pret + esl('<sentinel:0>') + suft + esl('<sentinel:1>') + esl('<sentinel:0>')
+         seq = torch.tensor(seq).to(self.lm_model.device)
+         print(len(seq), seq.size())
+         decoder = Scorer(self.lm_model, min_len=len(seq), max_len=len(seq)+2, temperature=1.0, show_tqdm=False)
+         decoder = decoder.to(self.lm_model.device)
+         probs = decoder.score(seq).cpu()
+         scores = []
+         for tok in options:
+             ind = model._encode(tok, strip_eos=True)
+             # print(tok, ind, probs[ind])
+             scores.append(probs[ind][0])
+
+    maxind = np.argmax(scores)
+    pred = options[maxind]
+    return pred
 
 def funtokenize(toks):
     """hacky tokenize to convert tokens back to python string that looks more like data"""
@@ -154,7 +150,7 @@ def cloze_test(args, lang, model):
     lines = json.load(open(file_path))
     results = []
     words = get_cloze_words(cloze_words_file)
-    for line in tqdm.tqdm(lines[:10]):
+    for line in tqdm.tqdm(lines):
         # text = ' '.join(line['nl_tokens']) + ''.join(line['pl_tokens'])
         text = ' '.join(line['nl_tokens']) + funtokenize(line['pl_tokens'])
         # print('*' * 100)
@@ -166,11 +162,8 @@ def cloze_test(args, lang, model):
             if len(suffix) > MAX_LEN/2:
                 suffix = suffix[:MAX_LEN//2] 
 
-        # scores = model.score_text([text.replace('<mask>', w) for w in words])
-        scores = [score(model, args, prefix, suffix, w) for w in words]
-
-        maxind = np.argmax(scores)
-        pred = words[maxind]
+        prefix, suffix = text.split('<mask>')
+        pred = cloze(model, args, prefix, suffix, words)
         results.append({'idx': line['idx'], 'prediction': pred})
 
 
@@ -215,13 +208,11 @@ def calculate_scores(answers, predictions):
     return result
 
 
-def print_results(args):
-    for lang in ['python', 'javascript', 'ruby', 'go',  'java', 'php']:
-    # for lang in ['javascript']:
-        answers = read_answers(os.path.join(args.cloze_path, 'evaluator/answers/', lang, 'answers.txt'))
-        predictions = read_predictions(os.path.join(args.output_dir, lang, 'predictions.txt'))
-        acc = calculate_scores(answers, predictions)
-        print('{}, {:.3f}'.format(lang, acc))
+def print_results(args, lang):
+    answers = read_answers(os.path.join(args.cloze_path, 'evaluator/answers/', lang, 'answers.txt'))
+    predictions = read_predictions(os.path.join(args.output_dir, lang, 'predictions.txt'))
+    acc = calculate_scores(answers, predictions)
+    print('{}, {:.3f}'.format(lang, acc))
 
 
 if __name__ == "__main__":
@@ -236,8 +227,11 @@ if __name__ == "__main__":
         dump_version_info()
 
     model = make_model(args)
-    for lang in ['python', 'javascript', 'ruby', 'go',  'java', 'php']:
+    langset = ['python', 'javascript', 'ruby', 'go',  'java', 'php']
+    for lang in langset:
     # for lang in ['javascript']:
         cloze_test(args, lang, model)
-
-    print_results(args)
+        print_results(args, lang)
+    
+    for lang in langset:
+        print_results(args, lang)
