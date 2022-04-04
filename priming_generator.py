@@ -56,7 +56,6 @@ class DecodingBase(nn.Module):
         self.temperature = temperature
         self.dummy_param = nn.Parameter(torch.empty(0))
         self.show_tqdm = show_tqdm
-        self.clear_cache()
 
     def decode_multiple_candidates(self, prefix: torch.Tensor, num_candidates: int = 1, encoded_stop_words: Optional[List[List[int]]] = None, all_must_complete=True, incremental_states=None, return_incremental_states=False):
         """
