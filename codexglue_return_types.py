@@ -102,7 +102,7 @@ if __name__ == "__main__":
             results = [force_none_for_no_returns(result) for result in results]
 
         if args.skip_none_type:
-            results = [result for result in results if result["true_type"] != "None"]
+            results = [result for result in results if result["return_type_from_source"] != "None"]
         
         if len(results) != len(examples):
             print(f"warning: {len(examples)} examples but {len(results)} results")

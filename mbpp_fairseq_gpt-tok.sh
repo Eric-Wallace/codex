@@ -13,7 +13,13 @@ shift
 name=$1
 shift
 
-split="validation"
+split=$1
+if [ -z $split ]
+then
+  split="validation"
+else
+  shift
+fi
 
 out_dir=expts/mbpp/${split}_${model_name}_last_gpt2_pg_ncg-${ncg}_temp-${temperature}/${name}
 

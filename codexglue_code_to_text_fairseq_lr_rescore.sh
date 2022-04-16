@@ -37,4 +37,5 @@ python codexglue.py \
   --result_base_path ${outdir}/results \
   --split $split \
   --shard_number $shard \
+  --num_shards 20 \
   | tee ${outdir}/log.out

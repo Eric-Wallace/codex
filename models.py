@@ -921,7 +921,7 @@ class OpenAIModel(Model):
         return self._call(
             engine=self.engine,
             prompt=prompt,
-            stop=stop_words,
+            stop=stop_words[:4],
             logprobs=1,
             max_tokens=max_tokens,
             top_p=top_p,
@@ -951,7 +951,7 @@ class OpenAIModel(Model):
                 engine=self.engine,
                 prompt=parts[0],
                 suffix=parts[1],
-                stop=stop_words,
+                stop=stop_words[:4],
                 logprobs=1,
                 max_tokens=max_tokens,
                 top_p=top_p,

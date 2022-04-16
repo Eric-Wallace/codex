@@ -20,7 +20,7 @@ from utils import dump_git_status, dump_version_info
 
 # stop words differ from human_eval because we don't have the function signature
 # TODO: consider standardizing these interfaces
-MBPP_STOP_WORDS = ["\nassert", "\nclass", "\nif", "\nprint", "[DONE]", '\n"""']
+MBPP_STOP_WORDS = ["\nassert", "\nclass", "\nif", '\n"""', "\nprint", "[DONE]"]
 
 class MBPPDataset(object):
     def __init__(self, path='/private/home/fhs/data/mbpp/mbpp.jsonl'):
