@@ -238,22 +238,52 @@ class Model:
         return sorted_choices, response
 
 class HFModel(Model):
-    def __init__(self, model_name, prompt_prefix=None, batch_size=None):
-        if prompt_prefix is not None:
-            raise NotImplementedError("--prompt_prefix for HFModel")
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-        #self.lm_model = AutoModelForCausalLM.from_pretrained(model_name)
-        from transformers import GPTJForCausalLM
-        self.lm_model = GPTJForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16, low_cpu_mem_usage=True)
-        self.lm_model.eval().cuda()
-    
-        tokenizer_name = args.tokenizer_name
-        self.lm_tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
-
+    def __init__(self, args, model_name, prompt_prefix=None, batch_size=None):
+        super().__init__()
+        self.args = args
+        self.prompt_prefix = prompt_prefix
+        if 'gpt-j' in model_name:
+            from transformers import GPTJForCausalLM
+            self.lm_model = GPTJForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16, low_cpu_mem_usage=True)
+            self.lm_tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name)
+        else:
+            assert 'incoder' in model_name
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+            if model_name == 'facebook/incoder-6B':
+                self.lm_model = AutoModelForCausalLM.from_pretrained(model_name, revision="float16", torch_dtype=torch.float16, low_cpu_mem_usage=True)
+            else:
+                self.lm_model = AutoModelForCausalLM.from_pretrained(model_name)
+            self.lm_tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.lm_model.eval().half().cuda()
         self.batch_size = batch_size
 
+    def _truncate_at_stop_words(self, stop_words, sequence_ids, logprobs, show_warnings=True):
+        # search for stopwords, to truncate after them
+        full_seq_decoded = self.lm_tokenizer.decode(sequence_ids, skip_special_tokens=False)
+        min_index = None
+        for stop_word in stop_words:
+            index = full_seq_decoded.find(stop_word)
+            if index < 0:
+                continue
+            if min_index is None or index < min_index:
+                min_index = index
+        
+        if min_index is not None:
+            # if you we find one of the stopwords, then we delete everything from the stopword on
+            seq_decoded = full_seq_decoded[:min_index]
+            # figure out how many tokens to take from log probs by reencoding the truncated string
+            # TODO: this may not exactly be right since this I don't think BPE is a prefix code
+            seq = self.lm_tokenizer.encode(seq_decoded, add_special_tokens=True)
+            logprobs = logprobs[:len(seq)]
+        else:
+            if show_warnings:
+                print('no stopword found!') # not having any stopword found is probably a very bad sign
+            seq = sequence_ids
+            seq_decoded = full_seq_decoded
+        return seq, seq_decoded, logprobs
+
     def encode_stop_words(self, stop_words: List[str]):
-        return [self.lm_tokenizer.encode(string) for string in stop_words]
+            return [self.lm_tokenizer.encode(string, add_special_tokens=False) for string in stop_words]
 
     def complete(self, prompt, stop_words: List[str], sampling=True, max_tokens=DEFAULT_MAX_TOKENS, top_p=0.95, n=1, num_log_probs=1, temperature=0.6, beam=1):
         ''' This function runs GPT-2 locally using HF transformers but places the outputs into an json that looks just like the one
@@ -266,6 +296,9 @@ class HFModel(Model):
 
         if not sampling:
             raise NotImplementedError()
+
+        if self.prompt_prefix is not None:
+            prompt = f"{self.prompt_prefix}\n{prompt}"
 
         assert isinstance(prompt, str)
         prompt = [prompt] # below code assumes list
@@ -295,7 +328,7 @@ class HFModel(Model):
                 )
 
                 # now do something dumb where you run the model another time to get the probs
-                logits = lm_model.forward(input_ids=total_sequences, return_dict=True).logits.detach().cpu()
+                logits = lm_model.forward(input_ids=total_sequences, return_dict=True).logits.detach().cpu().to(torch.float32)
                 # get the top tokens and probs for the generated tokens
                 probs = torch.softmax(logits[:,-max_tokens-1:], dim=2).cpu()
                 top_probs, top_tokens = torch.topk(probs, k=num_log_probs)
@@ -308,33 +341,27 @@ class HFModel(Model):
                 seq = total_sequences[batch_id][-max_tokens:]
                 curr_json = {}
 
-                # if you we find one of the stopwords, then we delete everything from the stopword on
-                curr_max_tokens = None
-                for stop_word_tensor in encoded_stop_words:
-                    for possible_stop_index in range(len(seq)):
-                        if seq[possible_stop_index:possible_stop_index+len(stop_word_tensor)].tolist() == stop_word_tensor:
-                            if curr_max_tokens is None or possible_stop_index < curr_max_tokens: # save first occurrence of stopword
-                                curr_max_tokens = possible_stop_index
+                # package up top_log_probs and top_tokens
+                curr_top_log_probs = top_log_probs[batch_id]
+                curr_top_tokens = top_tokens[batch_id]
+                assert len(curr_top_log_probs) == len(curr_top_tokens)
+                zipped_lps = list(zip(curr_top_log_probs, curr_top_tokens))
 
-                if curr_max_tokens is not None: # stopword is found, cut stuff off
-                    curr_json['text'] = self.lm_tokenizer.decode(seq[:curr_max_tokens], skip_special_tokens=True)
-                else:
-                    print('no stopword found!') # not having the stopword found is probably a very bad sign
-                    curr_json['text'] = self.lm_tokenizer.decode(seq, skip_special_tokens=True)
+                seq, _, zipped_lps = self._truncate_at_stop_words(stop_words, seq, zipped_lps)
 
+                # unpack
+                curr_top_log_probs, curr_top_tokens = zip(*zipped_lps)
+
+                # cutoff the -1 here because the probs are shifted one over for LMs
+                curr_top_log_probs = curr_top_log_probs[:-1]
+                curr_top_tokens = curr_top_tokens[:-1]
 
                 # fill the return json with the top tokens and probs to match the OpenAI return value.
                 curr_json['logprobs'] = {}
                 curr_json['logprobs']['top_logprobs'] = []
                 curr_json['logprobs']['token_logprobs'] = []
                 curr_json['logprobs']['tokens'] = []
-                # cutoff the -1 here because the probs are shifted one over for LMs
-                if curr_max_tokens is None: # no stopword
-                    curr_top_log_probs = top_log_probs[batch_id][:-1]
-                    curr_top_tokens = top_tokens[batch_id][:-1]
-                else:
-                    curr_top_log_probs = top_log_probs[batch_id][:curr_max_tokens-1]
-                    curr_top_tokens = top_tokens[batch_id][:curr_max_tokens-1]
+
                 for current_element_top_log_probs, current_element_top_tokens in zip(curr_top_log_probs, curr_top_tokens):
                     # tokens is a list of the top token at each position
                     curr_json['logprobs']['tokens'].append(self.lm_tokenizer.decode([current_element_top_tokens[0]]))
@@ -345,6 +372,8 @@ class HFModel(Model):
                     for log_prob, token in zip(current_element_top_log_probs, current_element_top_tokens):
                         temp[self.lm_tokenizer.decode(token.item())] = log_prob.item()
                     curr_json['logprobs']['top_logprobs'].append(temp)
+
+                curr_json['text'] = self.lm_tokenizer.decode(seq, skip_special_tokens=True)
 
                 choices.append(curr_json)
         return_json['choices'] = choices
@@ -981,6 +1010,7 @@ class OpenAIModel(Model):
 
 def make_model(args, cached_model=None):
     model_name = args.model_name
+    print(f"guessing model type from {model_name}")
     if model_name is None:
         return Model()
     tokenizer_name = args.tokenizer_name
@@ -989,7 +1019,7 @@ def make_model(args, cached_model=None):
         if prompt_prefix is not None:
             raise NotImplementedError("prompt prefix for codex models")
         return OpenAIModel(args, model_name, persistent=True)
-    elif 'fairseq' or '/checkpoint' in model_name:
+    elif 'fairseq' in model_name or '/checkpoint' in model_name:
         if "gpt2tok" in model_name:
             assert tokenizer_name == "gpt2"
         else:
@@ -1001,9 +1031,11 @@ def make_model(args, cached_model=None):
         elif 'gpt-j' in model_name:
             if prompt_prefix is not None:
                 raise NotImplementedError()
-            return HFModel(model_name, tokenizer_name, batch_size=args.batch_size)
+            return HFModel(args, model_name, tokenizer_name, batch_size=args.batch_size)
         else:
             raise ValueError(f"couldn't guess model type from {model_name}")
+    elif 'incoder' in model_name:
+        return HFModel(args, model_name, prompt_prefix=prompt_prefix, batch_size=args.batch_size)
     elif model_name == 'code-gpt2':
         if prompt_prefix is not None:
             raise NotImplementedError()
@@ -1011,4 +1043,4 @@ def make_model(args, cached_model=None):
     else:
         if prompt_prefix is not None:
             raise NotImplementedError()
-        return HFModel(model_name, tokenizer_name, batch_size=args.batch_size)
+        return HFModel(args, model_name, tokenizer_name, batch_size=args.batch_size)
