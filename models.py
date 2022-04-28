@@ -437,7 +437,7 @@ class FairseqModel(Model):
 
     @property
     def _extra_stop_words(self):
-        return ["<|", "<|/", "<code>", "</code>", "<cell>", "</cell>"]
+        return ["<|", "<|/", "<code>", "</code>", "<cell>", "</cell>", "<text>", "</text>"]
 
     def _encode(self, text: str, strip_eos=False):
         # -> torch.tensor
