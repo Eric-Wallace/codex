@@ -247,7 +247,7 @@ class HFModel(Model):
             self.lm_model = GPTJForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16, low_cpu_mem_usage=True)
             self.lm_tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name)
         else:
-            assert 'incoder' in model_name
+            assert 'incoder' in model_name or '-hf' in model_name
             from transformers import AutoModelForCausalLM, AutoTokenizer
             if model_name == 'facebook/incoder-6B':
                 self.lm_model = AutoModelForCausalLM.from_pretrained(model_name, revision="float16", torch_dtype=torch.float16, low_cpu_mem_usage=True)
@@ -1019,6 +1019,8 @@ def make_model(args, cached_model=None):
         if prompt_prefix is not None:
             raise NotImplementedError("prompt prefix for codex models")
         return OpenAIModel(args, model_name, persistent=True)
+    elif 'incoder' in model_name or '-hf' in model_name:
+        return HFModel(args, model_name, prompt_prefix=prompt_prefix, batch_size=args.batch_size)
     elif 'fairseq' in model_name or '/checkpoint' in model_name:
         if "gpt2tok" in model_name:
             assert tokenizer_name == "gpt2"
@@ -1034,8 +1036,6 @@ def make_model(args, cached_model=None):
             return HFModel(args, model_name, tokenizer_name, batch_size=args.batch_size)
         else:
             raise ValueError(f"couldn't guess model type from {model_name}")
-    elif 'incoder' in model_name:
-        return HFModel(args, model_name, prompt_prefix=prompt_prefix, batch_size=args.batch_size)
     elif model_name == 'code-gpt2':
         if prompt_prefix is not None:
             raise NotImplementedError()
