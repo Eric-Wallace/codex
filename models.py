@@ -238,7 +238,7 @@ class Model:
         return sorted_choices, response
 
 class HFModel(Model):
-    def __init__(self, args, model_name, prompt_prefix=None, batch_size=None):
+    def __init__(self, args, model_name, prompt_prefix=None, batch_size=None, check_low_prob_indices=None):
         super().__init__()
         self.args = args
         self.prompt_prefix = prompt_prefix
@@ -256,6 +256,8 @@ class HFModel(Model):
             self.lm_tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.lm_model.eval().half().cuda()
         self.batch_size = batch_size
+
+        self.check_low_prob_indices = check_low_prob_indices
 
     def _truncate_at_stop_words(self, stop_words, sequence_ids, logprobs, show_warnings=True):
         # search for stopwords, to truncate after them
@@ -331,6 +333,12 @@ class HFModel(Model):
                 logits = lm_model.forward(input_ids=total_sequences, return_dict=True).logits.detach().cpu().to(torch.float32)
                 # get the top tokens and probs for the generated tokens
                 probs = torch.softmax(logits[:,-max_tokens-1:], dim=2).cpu()
+                if self.check_low_prob_indices is not None:
+                    print("checking tokens")
+                    to_check = probs[...,self.check_low_prob_indices]
+                    if torch.any(to_check > 1e-4):
+                        print("warning: some tokens-to-check have non-zero probability")
+
                 top_probs, top_tokens = torch.topk(probs, k=num_log_probs)
                 logprobs = torch.log(probs)
                 top_log_probs = torch.log(top_probs)

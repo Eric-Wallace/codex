@@ -16,24 +16,24 @@ class InfillingModel:
 
     EOSS = "<eoss>"
 
-    def __init__(self, model_path):
+    def __init__(self, model_path, bpe="gpt2_pretokenization_newlines_only"):
         self.model_path = model_path
         root_dir, fname = os.path.split(model_path)
         self.root_dir, self.fname = root_dir, fname
-
-        print(f"loading model from {root_dir}/{fname}")
-        #root_dir="/checkpoint/dpf/models/cm-1.3B-ourtok-lr8e-4--4e-4/cm-1B-ourtok/"
-        model = TransformerLanguageModel.from_pretrained(root_dir, fname, bpe="gpt2_pretokenization_newlines_only", gpt2_encoder_json=f"{root_dir}/vocab.json", gpt2_vocab_bpe=f"{root_dir}/merges.txt")
-        model = model.half()
-        model = model.cuda().eval()
-        self.model = model
-        is_cm = True
+        self.bpe = bpe
 
         self.tokenizer = tokenizer = ByteLevelBPETokenizer.from_file(
             os.path.join(root_dir, "vocab.json"),
             os.path.join(root_dir, "merges.txt"),
-            pretokenizer_split_newlines_only=True
+            pretokenizer_split_newlines_only=(bpe=="gpt2_pretokenization_newlines_only")
         )
+
+        print(f"loading model from {root_dir}/{fname}")
+        model = TransformerLanguageModel.from_pretrained(root_dir, fname, bpe=bpe, gpt2_encoder_json=f"{root_dir}/vocab.json", gpt2_vocab_bpe=f"{root_dir}/merges.txt")
+        model = model.half()
+        model = model.cuda().eval()
+        self.model = model
+        is_cm = True
 
         if is_cm:
             special_tokens = []
@@ -155,4 +155,5 @@ def docstring_to_code(infilling_model, **kwargs):
 
 if __name__ == "__main__":
     infilling_model = InfillingModel("/checkpoint/dpf/models/cm-6B-armen/cm-6B-ourtok/best.pt")
+    #infilling_model = InfillingModel("/checkpoint/dpf/models/cm-1.3B-gpt2tok-xlmg/checkpoint_best_consolidated.pt", bpe="gpt2")
     _ = code_to_docstring(infilling_model, verbose=True, sampling=True, sampling_topp=0.6, temperature=0.6)
