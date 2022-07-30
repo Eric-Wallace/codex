@@ -223,7 +223,7 @@ class Model:
                 if key in choice:
                     d[key] = choice[key]
             choices.append(d)
-
+        
         if bidirectional_scoring:
             completes = [choice['complete'] for choice in choices]
             scores = self.score_text(completes, scoring=scoring)
@@ -1016,6 +1016,83 @@ class OpenAIModel(Model):
         response['choices'] = choices
         return response
 
+
+class OpenAIPropmtedInfillingModel(OpenAIModel):
+    def __init__(self, args, engine='davinci-codex', persistent=True, prompt_prefix=None):
+        super().__init__(args, engine, persistent, prompt_prefix)
+    
+    def infill(self, parts: List[str], stop_words:Optional[List[str]]=None, verbose=False, n=1, 
+               truncation_parameters: List[TruncationParameters]=None, sampling=True, max_tokens=DEFAULT_MAX_TOKENS, 
+               top_p=0.95, temperature=0.0, beam=1, **kwargs):
+        if not sampling:
+            raise NotImplementedError()
+        if beam != 1:
+            raise NotImplementedError()
+
+        if len(parts) != 2:
+            raise NotImplementedError("can't infill more than 2 parts")
+        if truncation_parameters is None:
+            trunc_params = TruncationParameters(None, None, False, None)
+        else:
+            assert len(truncation_parameters) == 1
+            trunc_params = truncation_parameters[0]
+        prompt_sequence = (
+            parts[0] + '<INFILL>\n' + parts[1] + 
+            '\n\n# Complete the above code by replacing the <INFILL> tag.\n' + 
+            parts[0]
+        )
+        stop_sequence = parts[1]
+        choices = []
+        for _ in range(self.args.max_infill_attempts):
+            response = self._call(
+                engine=self.engine,
+                prompt=prompt_sequence,
+                suffix=parts[1],
+                stop=stop_sequence,
+                logprobs=1,
+                max_tokens=max_tokens,
+                top_p=top_p,
+                temperature=temperature,
+                n=n,
+                **kwargs,
+            )
+            finished_choices = [choice for choice in response['choices'] if choice['finish_reason'] == 'stop']
+            unfinished_choices = [choice for choice in response['choices'] if choice['finish_reason'] != 'stop']
+            # prioritize finished completions
+            choices.extend(finished_choices)
+            if len(choices) >= n:
+                break
+        # but if necessary, use unfinished choices
+        if len(choices) < n:
+            choices.extend(unfinished_choices)
+        choices = choices[:n]
+        assert len(choices) == n
+        for choice in choices:
+            choice['infills_untruncated'] = [choice['text']]
+            truncated = trunc_params.truncate(choice['text'])
+            # api doesn't let us set this to an empty string
+            if len(truncated) > 0:
+                choice['text'] = truncated
+        response['choices'] = choices
+        return response
+    
+    def complete(self, prompt, stop_words, max_tokens=450, top_p=0.95, temperature=0.6, sampling=True, beam=1, n=1, **kwargs):
+        if not sampling:
+            raise NotImplementedError()
+        if beam != 1:
+            raise NotImplementedError()
+        return self._call(
+            engine=self.engine,
+            prompt=prompt,
+            logprobs=1,
+            max_tokens=max_tokens,
+            top_p=top_p,
+            temperature=temperature,
+            n=n,
+            **kwargs
+        )
+
+
 def make_model(args, cached_model=None):
     model_name = args.model_name
     print(f"guessing model type from {model_name}")
@@ -1023,6 +1100,9 @@ def make_model(args, cached_model=None):
         return Model()
     tokenizer_name = args.tokenizer_name
     prompt_prefix = args.prompt_prefix
+    if model_name.startswith('openai_prompted_infilling'):  # openai_prompted_infilling:MODEL_NAME for zero-shot full information infilling of L->R models
+        model_name = model_name.split(':')[1].strip()
+        return OpenAIPropmtedInfillingModel(args, model_name)
     if 'davinci' in model_name or 'cushman' in model_name:
         if prompt_prefix is not None:
             raise NotImplementedError("prompt prefix for codex models")
