@@ -1047,7 +1047,6 @@ class OpenAIPropmtedInfillingModel(OpenAIModel):
             response = self._call(
                 engine=self.engine,
                 prompt=prompt_sequence,
-                suffix=parts[1],
                 stop=stop_sequence,
                 logprobs=1,
                 max_tokens=max_tokens,
