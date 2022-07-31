@@ -6,8 +6,10 @@ from typing import List, Optional
 import random
 import sys
 import argparse
+import pprint
 
 from collections import namedtuple
+from plbart_utils import find_longest_suffix
 try:
     import torch
 except:
@@ -386,6 +388,95 @@ class HFModel(Model):
                 choices.append(curr_json)
         return_json['choices'] = choices
         return return_json
+
+class PLBart(Model):
+    def __init__(self, args, prompt_prefix=None, batch_size=None):
+        super().__init__()
+        self.args = args
+        if prompt_prefix is not None:
+            raise NotImplementedError("--prompt_prefix")
+        if not (batch_size is None or batch_size == 1):
+            raise NotImplementedError(f"--batch_size={batch_size}")
+        self.batch_size = batch_size
+        from transformers import PLBartForConditionalGeneration, PLBartTokenizer
+        self.lm_model = PLBartForConditionalGeneration.from_pretrained("uclanlp/plbart-large")
+        self.lm_model.eval().half().cuda()
+        self.lm_tokenizer = PLBartTokenizer.from_pretrained("uclanlp/plbart-large", src_lang="python", tgt_lang="python")
+
+    def complete(self, prompt, stop_words: List[str], sampling=True, max_tokens=DEFAULT_MAX_TOKENS, top_p=0.95, n=1, num_log_probs=1, temperature=0.6, beam=1):
+        raise NotImplementedError("PLBart doesn't allow completion; only infilling")
+
+    def infill(self, parts: List[str], truncation_parameters:List[TruncationParameters], verbose=False, **kwargs):
+        from plbart_utils import tokenize_python, detokenize_code
+
+        if truncation_parameters is None:
+            truncation_parameters = [TruncationParameters(None, None, False, None) for _ in parts[:-1]]
+
+        assert len(truncation_parameters) == len(parts) - 1
+        if len(parts) != 2:
+            raise NotImplementedError(f"infill with {len(parts)} parts")
+        else:
+            prefix, suffix = parts
+            trunc_params = truncation_parameters[0]
+
+        if prefix.endswith("\n"):
+            prefix = prefix.rstrip()
+
+        text = f"{prefix}MASK\n{suffix}"
+        
+        pretokens = [x.replace("MASK", "<mask>") for x in tokenize_python(text, keep_comments=True)]
+        pretokenized_str = ' '.join(pretokens)
+        tokens = self.lm_tokenizer(pretokenized_str).input_ids
+        mask_index = tokens.index(self.lm_tokenizer.mask_token_id)
+        prefix_tokens = tokens[:mask_index]
+        suffix_tokens = tokens[mask_index+1:]
+
+        inputs = self.lm_tokenizer(pretokenized_str, return_tensors="pt").to(self.lm_model.device)
+
+        generated_tokens = self.lm_model.generate(**inputs,
+                                               decoder_start_token_id=self.lm_tokenizer.lang_code_to_id["python"],
+                                               max_length=512,
+                                               do_sample=kwargs['sampling'],
+                                               temperature=kwargs['temperature'],
+                                               top_p=kwargs['top_p'],
+        )[0].tolist()
+
+        generated_text = self.lm_tokenizer.decode(generated_tokens, skip_special_tokens=False)
+
+        _, _, (_, tokens_untruncated) = find_longest_suffix(prefix_tokens, generated_tokens)
+        text_untruncated_code_tokenized = self.lm_tokenizer.decode(tokens_untruncated, skip_special_tokens=True)
+        # text_untruncated_code_tokenized = text_untruncated_code_tokenized.strip()
+        # if text_untruncated_code_tokenized.startswith("NEW_LINE"):
+        #     text_untruncated_code_tokenized = text_untruncated_code_tokenized[len("NEW_LINE"):]
+        _, start_tabs = detokenize_code(self.lm_tokenizer.decode(prefix_tokens, skip_special_tokens=True))
+        text_untruncated, _ = detokenize_code(text_untruncated_code_tokenized, start_tabs)
+        text = trunc_params.truncate(text_untruncated)
+        if verbose:
+            print(f"--prefix:--\n{prefix}")
+            print(f'--output (w/ special):--\n{self.lm_tokenizer.decode(generated_tokens, skip_special_tokens=False)}')
+            print(f'--output (no special):--\n{self.lm_tokenizer.decode(generated_tokens, skip_special_tokens=True)}')
+            print(f"--infill (untruncated, code tokenized):--\n{text_untruncated_code_tokenized}")
+            print(f"--infill (untruncated):--\n{text_untruncated}")
+            print(f"--infill (truncated):--\n{text}")
+            print(f"--suffix:--\n{suffix}")
+
+        choice = {
+            'complete': [parts[0], text, parts[1]],
+            'generated_text': [generated_text],
+            'infills_untruncated': [text_untruncated],
+            'ids': None,
+            'raw': None,
+            'logprobs': {
+                'token_logprobs': None,
+                'tokens': None,
+            },
+        }
+
+        return {
+            'prompt_parts': parts,
+            'choices': [choice] * kwargs.get("n", 1),
+        }
+    
 
 class FairseqModel(Model):
     def __init__(self, args: argparse.Namespace, model_path: str, prompt_prefix=None, batch_size=None, model=None, max_seq_length=None):
@@ -1016,6 +1107,91 @@ class OpenAIModel(Model):
         response['choices'] = choices
         return response
 
+class MetaAPI(Model):
+    END_OF_TEXT = '<|endoftext|>'
+
+    def __init__(self, args, ip='http://100.96.176.231:6010', prompt_prefix=None, verbose=False):
+        self.args = args
+        self.prompt_prefix = prompt_prefix
+        self.ip = ip
+        self.verbose = verbose
+
+    @property
+    def _extra_stop_words(self):
+        return ["<|", "<|/", "<code>", "</code>", "<cell>", "</cell>", "<text>", "</text>"]
+
+    def encode_stop_words(self, stop_words: List[str]):
+        return stop_words
+
+    def score_text(self, text_batch: List[str], scoring: str):
+        raise NotImplementedError()
+        all_scores = []
+        if scoring == 'random':
+            return [random.random() for _ in text_batch]
+        for text in text_batch:
+            response = self.complete(text, None, max_tokens=0, temperature=1.0, echo=True)
+            choice = response['choices'][0]
+            token_log_probs = choice['logprobs']['token_logprobs']
+            tokens = choice['logprobs']['tokens']
+
+            if self.END_OF_TEXT in tokens:
+                ix = tokens.index(self.END_OF_TEXT)
+                # keep the token, so that we have the score for ending the seq, but remove everything afterward
+                tokens = tokens[:ix+1]
+                token_log_probs = token_log_probs[:ix+1]
+
+            # remove None at the beginning -- no probability for the initial token, since there's no BOS
+            token_log_probs = token_log_probs[1:]
+            if scoring == 'sum':
+                score = np.sum(token_log_probs)
+            elif scoring == 'mean':
+                score = np.mean(token_log_probs)
+            else:
+                raise NotImplementedError(f"scoring {scoring}")
+            all_scores.append(score)
+        return all_scores
+
+    def _call(self, **kwargs):
+        import requests
+        import json
+
+        payload = dict(**kwargs)
+        if self.verbose:
+            pprint.pprint(payload)
+        response = json.loads(requests.post(f"{self.ip}/completions", json=payload)._content)
+        if self.verbose:
+            pprint.pprint(response)
+        return response
+
+    def complete(self, prompt, stop_words, max_tokens=450, top_p=0.95, temperature=0.6, sampling=True, beam=1, n=1, **kwargs):
+        if not sampling:
+            raise NotImplementedError()
+        if beam != 1:
+            raise NotImplementedError()
+        if self.prompt_prefix:
+            prompt = f"{self.prompt_prefix}\n{prompt}"
+        response = self._call(
+            prompt=prompt,
+            # stop=stop_words[:4],
+            # logprobs=1,
+            max_tokens=max_tokens,
+            top_p=top_p,
+            temperature=temperature,
+            n=n,
+            **kwargs
+        )
+        if stop_words is None:
+            stop_words = []
+        stop_words = stop_words + self._extra_stop_words
+        # TODO: deal with log probs
+        tp = TruncationParameters.from_heuristics(["stop_words"], stop_words=stop_words)
+        for completion in response['choices']:
+            completion['text'] = tp.truncate(completion['text'])
+        return response
+
+    def infill(self, parts: List[str], stop_words:Optional[List[str]]=None, verbose=False, n=1, truncation_parameters: List[TruncationParameters]=None, sampling=True, max_tokens=DEFAULT_MAX_TOKENS, top_p=0.95, temperature=0.0, beam=1, **kwargs):
+        raise NotImplementedError()
+
 def make_model(args, cached_model=None):
     model_name = args.model_name
     print(f"guessing model type from {model_name}")
@@ -1048,6 +1224,8 @@ def make_model(args, cached_model=None):
         if prompt_prefix is not None:
             raise NotImplementedError()
         return CodeGPT2()
+    elif model_name.startswith("http://"):
+        return MetaAPI(args, model_name, prompt_prefix=prompt_prefix, verbose=False)
     else:
         if prompt_prefix is not None:
             raise NotImplementedError()
