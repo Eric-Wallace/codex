@@ -213,9 +213,9 @@ def detokenize_code(code, start_tabs=0):
     tabs = "    " * start_tabs
     for i, line in enumerate(lines):
         line = line.strip()
-        if line.startswith("INDENT "):
+        if line.startswith("INDENT"):
             tabs += "    "
-            line = line.replace("INDENT ", tabs)
+            line = line.replace("INDENT ", tabs).replace("INDENT", tabs)
         elif line.startswith("DEDENT"):
             number_dedent = line.count("DEDENT")
             tabs = tabs[4 * number_dedent:]

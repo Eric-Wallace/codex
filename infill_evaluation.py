@@ -109,6 +109,8 @@ def run_systematic_infill(args, model: Model, eval_type="one_line", result_base_
                     truncation_parameters=truncation_parameters,
                     scoring=args.candidate_scoring,
                     stop_words=HUMAN_EVAL_STOP_WORDS,
+                    true_infill=infilling_problem["missing_lines"],
+                    line_aligned=True,
                 )
                 if args.max_tokens is not None:
                     kwargs['max_tokens'] = args.max_tokens

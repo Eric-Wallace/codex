@@ -157,7 +157,9 @@ class Model:
     def rank_infills(self, parts: List[str], stop_words: Optional[List[str]]=None, verbose=False, bidirectional_scoring=False, bidirectional_generation=False,
                     cached_response=None, scoring='mean',
                     truncation_parameters: List[TruncationParameters] = None,
-                    sampling=True, temperature=0.6, top_p=0.95, n=1, max_tokens=DEFAULT_MAX_TOKENS, beam=1):
+                    sampling=True, temperature=0.6, top_p=0.95, n=1, max_tokens=DEFAULT_MAX_TOKENS, beam=1,
+                    **kwargs,
+                    ):
         if truncation_parameters is None:
             truncation_parameters = [TruncationParameters(None, None, False, None) for _ in parts[:-1]]
         assert len(truncation_parameters) == len(parts) - 1
@@ -183,10 +185,11 @@ class Model:
                     top_p=top_p,
                     n=n,
                     max_tokens=max_tokens,
-                    beam=beam
+                    beam=beam,
+                    **kwargs
                 )
             else:
-                response = self.complete(prefix, stop_words=stop_words, sampling=sampling, temperature=temperature, top_p=top_p, n=n, max_tokens=max_tokens, beam=beam)
+                response = self.complete(prefix, stop_words=stop_words, sampling=sampling, temperature=temperature, top_p=top_p, n=n, max_tokens=max_tokens, beam=beam, **kwargs)
         else:
             response = cached_response
 
@@ -406,8 +409,21 @@ class PLBart(Model):
     def complete(self, prompt, stop_words: List[str], sampling=True, max_tokens=DEFAULT_MAX_TOKENS, top_p=0.95, n=1, num_log_probs=1, temperature=0.6, beam=1):
         raise NotImplementedError("PLBart doesn't allow completion; only infilling")
 
-    def infill(self, parts: List[str], truncation_parameters:List[TruncationParameters], verbose=False, **kwargs):
+    def infill(self, parts: List[str], truncation_parameters:List[TruncationParameters], verbose=False, true_infill=None, line_aligned=False, **kwargs):
         from plbart_utils import tokenize_python, detokenize_code
+
+        def remove_blank_lines_at_start_and_end(text):
+            lines = text.split("\n")
+            while lines and (not lines[0].strip()):
+                lines = lines[1:]
+            while lines and (not lines[-1].strip()):
+                lines = lines[:-1]
+            return "\n".join(lines)
+        
+        def remove_dedent(pretokens):
+            while pretokens and pretokens[-1] in ["DEDENT", "NEW_LINE"]:
+                pretokens = pretokens[:-1]
+            return pretokens
 
         if truncation_parameters is None:
             truncation_parameters = [TruncationParameters(None, None, False, None) for _ in parts[:-1]]
@@ -419,17 +435,38 @@ class PLBart(Model):
             prefix, suffix = parts
             trunc_params = truncation_parameters[0]
 
-        if prefix.endswith("\n"):
-            prefix = prefix.rstrip()
+        if line_aligned:
+            if true_infill is None:
+                raise ValueError("must include true_infill for PLBart with line alignment")
 
-        text = f"{prefix}MASK\n{suffix}"
+            prefix = remove_blank_lines_at_start_and_end(prefix)
+            true_infill = remove_blank_lines_at_start_and_end(true_infill)
+            suffix = remove_blank_lines_at_start_and_end(suffix)
+
+            prefix_pretokens = remove_dedent(tokenize_python(prefix, keep_comments=True))
+            # print(f"prefix_pretokens\n{' '.join(prefix_pretokens)}")
+            prefix_infill_pretokens = remove_dedent(tokenize_python(prefix + "\n" + true_infill, keep_comments=True))
+            # print(f"prefix_infill_pretokens\n{' '.join(prefix_infill_pretokens)}")
+            full_pretokens = tokenize_python(prefix + "\n" + true_infill + "\n" + suffix, keep_comments=True)
+            # print(f"full_pretokens\n{' '.join(full_pretokens)}")
+            suffix_pretokens = full_pretokens[len(prefix_infill_pretokens):]
+            # print(f"suffix_pretokens\n{' '.join(suffix_pretokens)}")
+            pretokens = prefix_pretokens + ["NEW_LINE", "<mask>"] + suffix_pretokens
+        else:
+            raise NotImplementedError()
         
-        pretokens = [x.replace("MASK", "<mask>") for x in tokenize_python(text, keep_comments=True)]
         pretokenized_str = ' '.join(pretokens)
+        # print(f"new pretokenized_str\n{pretokenized_str}")
         tokens = self.lm_tokenizer(pretokenized_str).input_ids
         mask_index = tokens.index(self.lm_tokenizer.mask_token_id)
         prefix_tokens = tokens[:mask_index]
         suffix_tokens = tokens[mask_index+1:]
+
+        # text = f"{prefix.rstrip()}MASK\n{suffix}"
+        # old_pretokens = [x.replace("MASK", "<mask>") for x in tokenize_python(text, keep_comments=True)]
+        # old_pretokenized_str = ' '.join(old_pretokens)
+        # print(f"old pretokenized_str\n{pretokenized_str}")
+
 
         inputs = self.lm_tokenizer(pretokenized_str, return_tensors="pt").to(self.lm_model.device)
 
@@ -448,7 +485,16 @@ class PLBart(Model):
         # text_untruncated_code_tokenized = text_untruncated_code_tokenized.strip()
         # if text_untruncated_code_tokenized.startswith("NEW_LINE"):
         #     text_untruncated_code_tokenized = text_untruncated_code_tokenized[len("NEW_LINE"):]
-        _, start_tabs = detokenize_code(self.lm_tokenizer.decode(prefix_tokens, skip_special_tokens=True))
+        prefix_str = self.lm_tokenizer.decode(prefix_tokens, skip_special_tokens=True)
+        # print("prefix_str:")
+        # print(prefix_str)
+        _, start_tabs = detokenize_code(prefix_str)
+        # print("start_tabs:")
+        # print(start_tabs)
+        # print("text_untruncated_code_tokenized:")
+        # print(text_untruncated_code_tokenized)
+        # print("text_untruncated")
+        # print(text_untruncated)
         text_untruncated, _ = detokenize_code(text_untruncated_code_tokenized, start_tabs)
         text = trunc_params.truncate(text_untruncated)
         if verbose:
@@ -462,6 +508,7 @@ class PLBart(Model):
 
         choice = {
             'complete': [parts[0], text, parts[1]],
+            'input_text': [pretokenized_str],
             'generated_text': [generated_text],
             'infills_untruncated': [text_untruncated],
             'ids': None,
@@ -1282,6 +1329,8 @@ def make_model(args, cached_model=None):
         return OpenAIModel(args, model_name, persistent=True)
     elif 'incoder' in model_name or '-hf' in model_name:
         return HFModel(args, model_name, prompt_prefix=prompt_prefix, batch_size=args.batch_size)
+    elif 'plbart' in model_name:
+        return PLBart(args, prompt_prefix)
     elif 'fairseq' in model_name or '/checkpoint' in model_name:
         if "gpt2tok" in model_name:
             assert tokenizer_name == "gpt2"
