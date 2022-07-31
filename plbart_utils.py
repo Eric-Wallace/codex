@@ -122,9 +122,11 @@ def tokenize_python(code, keep_comments=False, process_strings=True):
                 SyntaxError,
                 UnicodeDecodeError,
         ) as e:
-            raise ValueError(
-                f'Impossible to parse tokens because of incorrect source code "{e}" ...'
-            )
+            print(e)
+            return tokens
+            # raise ValueError(
+            #     f'Impossible to parse tokens because of incorrect source code "{e}" ...'
+            # )
         except StopIteration:
             raise Exception(f"End of iterator before ENDMARKER token.")
 
