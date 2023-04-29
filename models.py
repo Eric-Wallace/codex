@@ -258,10 +258,12 @@ class BigCodeModel(Model):
             self.FIM_PREFIX = "<fim_prefix>"
             self.FIM_SUFFIX = "<fim_suffix>"
             self.FIM_MIDDLE = "<fim_middle>"
+            self.MAX_INPUT_LENGTH = 8192
         elif model_name == "bigcode/santacoder":
             self.FIM_PREFIX = "<fim-prefix>"
             self.FIM_SUFFIX = "<fim-suffix>"
             self.FIM_MIDDLE = "<fim-middle>"
+            self.MAX_INPUT_LENGTH = 2048
         else:
             raise ValueError(f"invalid model_name {model_name}")
     
@@ -314,7 +316,10 @@ class BigCodeModel(Model):
         prompt = f"{self.FIM_PREFIX}{prefix}{self.FIM_SUFFIX}{suffix}{self.FIM_MIDDLE}"
         encoded = self.tokenizer.batch_encode_plus([prompt], return_tensors="pt")
         encoded = encoded.to(torch.device("cuda"))
-        generated = model.generate(**encoded, do_sample=sampling and temperature>0.0, temperature=temperature, top_p=top_p, max_new_tokens=max_tokens)
+        encoded['input_ids'] = encoded['input_ids'][:,-(self.MAX_INPUT_LENGTH-max_tokens-1):]
+        encoded['attention_mask'] = encoded['attention_mask'][:,-(self.MAX_INPUT_LENGTH-max_tokens-1):]
+        with torch.no_grad():
+            generated = model.generate(**encoded, do_sample=sampling and temperature>0.0, temperature=temperature, top_p=top_p, max_new_tokens=max_tokens, pad_token_id=self.tokenizer.eos_token_id)
         decoded = tokenizer.batch_decode(generated)[0]
 
         if self.END_OF_TEXT in decoded:
