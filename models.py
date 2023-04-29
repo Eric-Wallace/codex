@@ -204,8 +204,8 @@ class Model:
                 print(f"--infill (truncated):--\n{text}")
                 print(f"--infill (untruncated):--\n{text_untruncated}")
                 print(f"--suffix:--\n{suffix}")
-                if 'ids' in choice:
-                    print(f"--decoded ids:--\n{self._decode(choice['ids'])}")
+                # if 'ids' in choice:
+                #     print(f"--decoded ids:--\n{self._decode(choice['ids'])}")
 
             def maybe_append_newline(s):
                 if not s.endswith("\n"):
@@ -238,6 +238,107 @@ class Model:
             sorted_choices = self._rank_helper(choices, scoring)
 
         return sorted_choices, response
+
+class BigCodeModel(Model):
+    END_OF_TEXT = "<|endoftext|>"
+    def __init__(self, args, model_name, prompt_prefix=None, batch_size=None, check_low_prob_indices=None):
+        super().__init__()
+        self.args = args
+        if prompt_prefix is not None:
+            raise NotImplementedError(f"prompt_prefix={prompt_prefix}")
+        self.prompt_prefix = prompt_prefix
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_name, torch_dtype=torch.float16, trust_remote_code=True
+        ).cuda().eval()
+        if self.prompt_prefix is not None:
+            raise NotImplementedError(f"prompt_prefix for BigCodeModel: {prompt_prefix}")
+        if model_name == "bigcode/large-model":
+            self.FIM_PREFIX = "<fim_prefix>"
+            self.FIM_SUFFIX = "<fim_suffix>"
+            self.FIM_MIDDLE = "<fim_middle>"
+        elif model_name == "bigcode/santacoder":
+            self.FIM_PREFIX = "<fim-prefix>"
+            self.FIM_SUFFIX = "<fim-suffix>"
+            self.FIM_MIDDLE = "<fim-middle>"
+        else:
+            raise ValueError(f"invalid model_name {model_name}")
+    
+    def complete(self, prompt, stop_words: List[str], sampling=True, max_tokens=DEFAULT_MAX_TOKENS, top_p=0.95, n=1, num_log_probs=1, temperature=0.6, beam=1):
+        raise NotImplementedError()
+        text = 'DUMMY'
+        choice = {
+            'text': text,
+            'logprobs': {
+                'token_logprobs': None,
+                'tokens': None,
+            },
+        }
+
+        return {
+            'prompt': prompt,
+            'choices': [choice] * kwargs.get("n", 1),
+        }
+
+    def infill(self, parts: List[str], stop_words: Optional[List[str]]=None, verbose=False, n=1, truncation_parameters: List[TruncationParameters]=None, sampling=True, max_tokens=DEFAULT_MAX_TOKENS, top_p=0.95, temperature=0.0, beam=1):
+        # fill in text between each string in parts
+        if truncation_parameters is None:
+            trunc_params = TruncationParameters(None, None, False, None)
+        else:
+            assert len(truncation_parameters) == 1
+            trunc_params = truncation_parameters[0]
+        
+        model = self.model
+        tokenizer = self.tokenizer
+        assert isinstance(parts, list)
+        if len(parts) != 2:
+            raise ValueError("FIM only supports single region infilling")
+
+        if not sampling:
+            raise NotImplementedError()
+        
+        if n != 1:
+            raise NotImplementedError()
+
+        if beam != 1:
+            raise NotImplementedError()
+
+        prefix, suffix = parts
+        if n != 1:
+            raise NotImplementedError()
+
+        if stop_words is None:
+            stop_words = []
+
+        prompt = f"{self.FIM_PREFIX}{prefix}{self.FIM_SUFFIX}{suffix}{self.FIM_MIDDLE}"
+        encoded = self.tokenizer.batch_encode_plus([prompt], return_tensors="pt")
+        encoded = encoded.to(torch.device("cuda"))
+        generated = model.generate(**encoded, do_sample=sampling and temperature>0.0, temperature=temperature, top_p=top_p, max_new_tokens=max_tokens)
+        decoded = tokenizer.batch_decode(generated)[0]
+
+        if self.END_OF_TEXT in decoded:
+            decoded = decoded.split(self.END_OF_TEXT)[0]
+        _, middle = decoded.split(self.FIM_MIDDLE)
+        complete = [prefix, middle, suffix]
+
+        choice = {
+            'complete': complete,
+            'text': trunc_params.truncate(middle),
+            'infills_untruncated': [middle],
+            'ids': None,
+            'raw': None,
+            'logprobs': {
+                'token_logprobs': None,
+                'tokens': None,
+            },
+        }
+
+        return {
+            'prompt_parts': parts,
+            'choices': [choice],
+        }
+
 
 class HFModel(Model):
     def __init__(self, args, model_name, prompt_prefix=None, batch_size=None, check_low_prob_indices=None):
@@ -1282,6 +1383,8 @@ def make_model(args, cached_model=None):
         return OpenAIModel(args, model_name, persistent=True)
     elif 'incoder' in model_name or '-hf' in model_name:
         return HFModel(args, model_name, prompt_prefix=prompt_prefix, batch_size=args.batch_size)
+    elif 'bigcode' in model_name:
+        return BigCodeModel(args, model_name, prompt_prefix=prompt_prefix, batch_size=args.batch_size)
     elif 'fairseq' in model_name or '/checkpoint' in model_name:
         if "gpt2tok" in model_name:
             assert tokenizer_name == "gpt2"
