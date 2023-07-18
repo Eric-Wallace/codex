@@ -1,7 +1,9 @@
 #!/bin/bash
 
 # model="/checkpoint/dpf/models/cm-6B-armen/checkpoint_last_consolidated.pt"
-model="/projects/tir3/users/dfried/code_models/models/cm-6B-armen/checkpoint_last_consolidated.pt"
+short_model=$1
+shift
+model="bigcode/${short_model}"
 
 num_candidates=$1
 temperature=$2
@@ -11,7 +13,7 @@ then
   split="test"
 fi
 
-outdir="expts/codexglue_code_to_text/${split}_cm-6B_ncg-${num_candidates}_temp-${temperature}"
+outdir="expts/codexglue_code_to_text/${split}_${short_model}_no-file_ncg-${num_candidates}_temp-${temperature}"
 
 shard=$4
 if [ -z $shard ]
@@ -26,7 +28,6 @@ mkdir -p $outdir
 python codexglue.py \
   --git_status \
   --model_name $model \
-  --tokenizer_name gpt2_pretokenization_newlines_only  \
   --candidate_scoring random \
   --batch_size 10 \
   --truncation_heuristics comment \
@@ -36,4 +37,5 @@ python codexglue.py \
   --result_base_path ${outdir}/results \
   --split $split \
   --shard_number $shard \
+  --max_input_length 2048 \
   | tee ${outdir}/log.out

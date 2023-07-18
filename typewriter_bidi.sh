@@ -26,7 +26,6 @@ python typewriter.py \
   data/typewriter_examples${suffix}.json \
   --git_status \
   --model_name ${model} \
-  --tokenizer_name gpt2_pretokenization_newlines_only  \
   --bidirectional_generation \
   --max_tokens 20 \
   --temperature ${temperature} \

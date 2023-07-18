@@ -87,7 +87,7 @@ def build_docstring_infill_prompt(code: str,
     if standardize_docstring:
         prompt_prefix, prompt_suffix = standardize_docstring_prompt(prompt_prefix, prompt_suffix)
 
-    prompt_suffix += f"\n{EOF}"
+    #prompt_suffix += f"\n{EOF}"
     return [prompt_prefix, prompt_suffix]
 
 def build_systematic_infill_prompt(original_prompt: str, code: str, num_before: int, num_after: int) -> Tuple[List[str], str]:
@@ -120,7 +120,7 @@ def truncate_docstring_infill(infill: str) -> str:
     infill = infill.strip()
     # try to figure out where the end of the comment is
     if TRIPLE_QUOTE in infill:
-        infill = infill[:infill.index(delim)]
+        infill = infill[:infill.index(TRIPLE_QUOTE)]
     infill = infill.strip()
     return infill
 

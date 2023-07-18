@@ -36,4 +36,5 @@ python typewriter.py \
   --truncation_heuristics  \
   --result_base_path $outdir/results \
   --shard_number $shard \
+  --max_input_length 2048 \
   | tee ${outdir}/log.out

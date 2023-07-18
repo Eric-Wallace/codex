@@ -79,6 +79,8 @@ def add_model_args(parser):
     parser.add_argument("--candidate_scoring", choices=["mean", "sum", "random"], default="mean")
     parser.add_argument("--max_tokens", type=int, default=DEFAULT_MAX_TOKENS)
 
+    parser.add_argument("--max_input_length", type=int, help="override the maximum context window size for the model (only implemented for BigCode models currently, to give large-model the same context length as SantaCoder")
+
 def add_infilling_args(parser):
     parser.add_argument("--truncation_heuristics", nargs='*', choices=TruncationParameters.HEURISTICS, default=["num_lines"])
     parser.add_argument("--bidirectional_generation", action="store_true", help="for infilling, generate candidates using both left and right contexts")
@@ -241,7 +243,7 @@ class Model:
 
 class BigCodeModel(Model):
     END_OF_TEXT = "<|endoftext|>"
-    def __init__(self, args, model_name, prompt_prefix=None, batch_size=None, check_low_prob_indices=None):
+    def __init__(self, args, model_name, prompt_prefix=None, batch_size=None, check_low_prob_indices=None, max_input_length=None):
         super().__init__()
         self.args = args
         if prompt_prefix is not None:
@@ -258,12 +260,17 @@ class BigCodeModel(Model):
             self.FIM_PREFIX = "<fim_prefix>"
             self.FIM_SUFFIX = "<fim_suffix>"
             self.FIM_MIDDLE = "<fim_middle>"
-            self.MAX_INPUT_LENGTH = 8192
+            self.MAX_INPUT_LENGTH = max_input_length or 8192
+        elif model_name == "bigcode/temp-model":
+            self.FIM_PREFIX = "<fim_prefix>"
+            self.FIM_SUFFIX = "<fim_suffix>"
+            self.FIM_MIDDLE = "<fim_middle>"
+            self.MAX_INPUT_LENGTH = max_input_length or 8192
         elif model_name == "bigcode/santacoder":
             self.FIM_PREFIX = "<fim-prefix>"
             self.FIM_SUFFIX = "<fim-suffix>"
             self.FIM_MIDDLE = "<fim-middle>"
-            self.MAX_INPUT_LENGTH = 2048
+            self.MAX_INPUT_LENGTH = max_input_length or 2048
         else:
             raise ValueError(f"invalid model_name {model_name}")
     
@@ -318,13 +325,29 @@ class BigCodeModel(Model):
         encoded = encoded.to(torch.device("cuda"))
         encoded['input_ids'] = encoded['input_ids'][:,-(self.MAX_INPUT_LENGTH-max_tokens-1):]
         encoded['attention_mask'] = encoded['attention_mask'][:,-(self.MAX_INPUT_LENGTH-max_tokens-1):]
-        with torch.no_grad():
+        with torch.inference_mode():
             generated = model.generate(**encoded, do_sample=sampling and temperature>0.0, temperature=temperature, top_p=top_p, max_new_tokens=max_tokens, pad_token_id=self.tokenizer.eos_token_id)
-        decoded = tokenizer.batch_decode(generated)[0]
+        if generated.size(0) != 1:
+            raise NotImplementedError("batching")
+        # TODO: figure out what's going on with this 0/! issue, where the model inserts ID 0 (which corresponds to !) at weird locations
+        gen_flat = generated.flatten()
+        if 0 in gen_flat:
+            if 0 in gen_flat[:encoded['input_ids'].size(-1)]:
+                print("warning: id 0 in sequence but appears to be in prompt; removing to be safe")
+            else:
+                print("warning: id 0 in sequence and appears to be in suffix; removing because it's probably a stray !")
+            print(tokenizer.decode(gen_flat[-max_tokens:]))
+            gen_flat = [ix for ix in gen_flat if ix != 0]
+        #decoded = tokenizer.batch_decode(generated)[0]
+        decoded = tokenizer.decode(gen_flat)
 
         if self.END_OF_TEXT in decoded:
             decoded = decoded.split(self.END_OF_TEXT)[0]
-        _, middle = decoded.split(self.FIM_MIDDLE)
+        parts = decoded.split(self.FIM_MIDDLE)
+        if len(parts) > 2:
+            print('warning: multiple "infills" found: ')
+            print(parts)
+        middle = parts[1]
         complete = [prefix, middle, suffix]
 
         choice = {
@@ -1409,7 +1432,7 @@ def make_model(args, cached_model=None):
     elif 'incoder' in model_name or '-hf' in model_name:
         return HFModel(args, model_name, prompt_prefix=prompt_prefix, batch_size=args.batch_size)
     elif 'bigcode' in model_name:
-        return BigCodeModel(args, model_name, prompt_prefix=prompt_prefix, batch_size=args.batch_size)
+        return BigCodeModel(args, model_name, prompt_prefix=prompt_prefix, batch_size=args.batch_size, max_input_length=args.max_input_length)
     elif 'fairseq' in model_name or '/checkpoint' in model_name:
         if "gpt2tok" in model_name:
             assert tokenizer_name == "gpt2"

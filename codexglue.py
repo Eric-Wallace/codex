@@ -48,6 +48,9 @@ def run_codexglue_code_to_text(args, model: Model, result_base_path=None, split=
         print(f"==== Writing results to new file {result_txt_fname} ====")
         result_txt = open(result_txt_fname, "w")
 
+    if args.start_instance:
+        start = args.start_instance
+
     all_results = []
 
     responses = {}
@@ -58,42 +61,41 @@ def run_codexglue_code_to_text(args, model: Model, result_base_path=None, split=
             problem = problems[i]
             if i < start:
                 continue
-            try:
-                prompt_parts = problem["prompt_parts"]
-                truncation_parameters = [
-                        TruncationParameters.from_heuristics(args.truncation_heuristics + ["num_lines"], missing_lines="hack to force a single line")
-                    ]
-                kwargs = dict(
-                    verbose=False, n=args.num_candidates,
-                    bidirectional_generation=args.bidirectional_generation, bidirectional_scoring=args.bidirectional_scoring,
-                    truncation_parameters=truncation_parameters,
-                    scoring=args.candidate_scoring,
-                    stop_words=['"""', '    """'] # triple quote strings are both their own unique tokens
-                )
-                if args.max_tokens is not None:
-                    kwargs['max_tokens'] = args.max_tokens
-                kwargs.update(sampling=True, top_p=args.top_p, temperature=args.temperature, beam=args.beam)
-                sorted_choices, response = model.rank_infills(prompt_parts, **kwargs)
-                responses[i] = response
-                top_choice = sorted_choices[0]
+            prompt_parts = problem["prompt_parts"]
+            truncation_parameters = [
+                    TruncationParameters.from_heuristics(args.truncation_heuristics + ["num_lines"], missing_lines="hack to force a single line")
+                ]
+            kwargs = dict(
+                verbose=False, n=args.num_candidates,
+                bidirectional_generation=args.bidirectional_generation, bidirectional_scoring=args.bidirectional_scoring,
+                truncation_parameters=truncation_parameters,
+                scoring=args.candidate_scoring,
+                stop_words=['"""', '    """'] # triple quote strings are both their own unique tokens
+            )
+            if args.max_tokens is not None:
+                kwargs['max_tokens'] = args.max_tokens
+            kwargs.update(sampling=True, top_p=args.top_p, temperature=args.temperature, beam=args.beam)
+            sorted_choices, response = model.rank_infills(prompt_parts, **kwargs)
+            responses[i] = response
+            top_choice = sorted_choices[0]
 
-                infill_result = problem.copy()
-                infill_result["text"] = top_choice["infills"][0]
-                infill_result["complete"] = top_choice["complete"]
-                infill_result["text_untruncated"] = top_choice["infills_untruncated"][0]
+            infill_result = problem.copy()
+            infill_result["text"] = top_choice["infills"][0]
+            infill_result["complete"] = top_choice["complete"]
+            infill_result["text_untruncated"] = top_choice["infills_untruncated"][0]
 
-                pbar.set_postfix({"output": infill_result["text"]})
+            pbar.set_postfix({"output": infill_result["text"]})
 
-                all_results.append(infill_result)
+            all_results.append(infill_result)
 
-                # Write docstring to file for BLEU eval
-                result_txt.write(f"{i}\t{infill_result['text'].encode('unicode_escape').decode('utf-8')}\n")
-                if i % 10 == 0:
-                    result_txt.flush()
-            except Exception as e:
-                print(f"Error on {i}")
-                print(e)
-                import pdb; pdb.set_trace()
+            # Write docstring to file for BLEU eval
+            result_txt.write(f"{i}\t{infill_result['text'].encode('unicode_escape').decode('utf-8')}\n")
+            if i % 10 == 0:
+                result_txt.flush()
+            # except Exception as e:
+            #     print(f"Error on {i}")
+            #     print(e)
+            #     import pdb; pdb.set_trace()
 
     # Note: since we don't save until the end of the run, these results are
     #  incomplete if we're resuming
@@ -114,6 +116,7 @@ def make_parser():
     parser.add_argument("--git_status", action="store_true")
     parser.add_argument("--resume", action="store_true")
 
+    parser.add_argument("--start_instance", type=int)
     parser.add_argument("--num_shards", type=int, default=10)
     parser.add_argument("--shard_number", type=int, default=-1)
 
