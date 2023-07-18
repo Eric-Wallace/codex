@@ -355,6 +355,7 @@ def make_parser():
     parser.add_argument("--generate_examples", action="store_true")
     parser.add_argument("--result_base_path")
     parser.add_argument("--num_examples", type=int)
+    parser.add_argument("--start_example", type=int)
 
     parser.add_argument("--num_shards", type=int, default=10)
     parser.add_argument("--shard_number", type=int, default=-1)
@@ -387,6 +388,8 @@ if __name__ == "__main__":
             json.dump(examples, f, indent=4)
     else:
         examples = load_json(args.example_filename)
+        if args.start_example:
+            examples = examples[args.start_example:]
         if args.num_examples:
             examples = examples[:args.num_examples]
 

@@ -1,7 +1,11 @@
 #!/bin/bash
 
-# model="/checkpoint/dpf/models/cm-6B-armen/checkpoint_last_consolidated.pt"
-model="/projects/tir3/users/dfried/code_models/models/cm-6B-armen/checkpoint_last_consolidated.pt"
+short_model=$1
+shift
+
+#short_model="santacoder"
+#short_model="large-model"
+model="bigcode/${short_model}"
 
 num_candidates=1
 temperature=0.0
@@ -9,8 +13,7 @@ temperature=0.0
 suffix="_formatted_iandf"
 #suffix="_formatted_full"
 
-outdir="expts/typewriter/cm-6B${suffix}_indent_def_ncg-${num_candidates}_temp-${temperature}_prompt-py"
-#outdir="expts/typewriter/cm-6B${suffix}_ncg-${num_candidates}_temp-${temperature}"
+outdir="expts/typewriter/${short_model}_indent_def_ncg-${num_candidates}_temp-${temperature}"
 
 shard=$1
 if [ -z $shard ]
@@ -26,7 +29,6 @@ python typewriter.py \
   data/typewriter_examples${suffix}.json \
   --git_status \
   --model_name ${model} \
-  --tokenizer_name gpt2_pretokenization_newlines_only  \
   --bidirectional_generation \
   --max_tokens 20 \
   --temperature ${temperature} \
@@ -34,5 +36,4 @@ python typewriter.py \
   --truncation_heuristics  \
   --result_base_path $outdir/results \
   --shard_number $shard \
-  --prompt_prefix "<| file ext=.py |>" \
   | tee ${outdir}/log.out

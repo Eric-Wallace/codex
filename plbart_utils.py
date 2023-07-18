@@ -61,6 +61,7 @@ def replace_general_string_tok(tok):
 
 
 def process_string(tok, char2tok, tok2char, is_comment, do_whole_processing=True):
+    from sacrebleu import tokenize_v14_international
     if not (do_whole_processing or is_comment):
         return tok.replace("\n", "\\n").replace("\r", "")
 
