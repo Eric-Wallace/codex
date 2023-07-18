@@ -79,6 +79,9 @@ class DecodingBase(nn.Module):
             assert prefix_len < self.max_len, "Max len is smaller than prefix length"
 
             src_tokens = prefix
+            print("src_tokens:")
+            print(src_tokens)
+            print()
             # length of the source text being the character length except EndOfSentence and pad
             src_lengths = (
                 (src_tokens.ne(self.eos) & src_tokens.ne(self.pad)).long().sum()

@@ -151,6 +151,7 @@ if __name__ == "__main__":
     with tqdm.tqdm(problems, ncols=120) as pbar:
         for task_id, problem in pbar:
             prompt = problem['prompt']
+            prompt = prompt.rstrip()
             if args.remove_test_cases:
                 prompt = remove_test_cases(prompt)
             # candidates: [{'text': text, 'logprobs': {...}}, ...]

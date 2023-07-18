@@ -23,7 +23,7 @@ from utils import dump_git_status, dump_version_info
 MBPP_STOP_WORDS = ["\nassert", "\nclass", "\nif", '\n"""', "\nprint", "[DONE]"]
 
 class MBPPDataset(object):
-    def __init__(self, path='/private/home/fhs/data/mbpp/mbpp.jsonl'):
+    def __init__(self, path='data/mbpp.jsonl'):
         self.data = [json.loads(line) for line in open(path)]
         split_ids = self.split_ids = {
             'evaluation': list(range(11, 510+1)),
@@ -46,6 +46,18 @@ class MBPPDataset(object):
             for split_name in split_ids.keys()
         }
         assert len(self.data_splits['evaluation']) == 500
+
+class SanitizedMBPPDataset(object):
+    def __init__(self, path='data/sanitized-mbpp.json'):
+        with open(path) as f:
+            self.data = json.load(f)
+        for inst in self.data:
+            inst['text'] = inst['prompt']
+            inst['test_setup_code'] = '\n'.join(inst['test_imports'])
+        self.data_splits = {
+            'sanitized': self.data,
+        }
+        #assert len(self.data_splits['sanitized']) == 426
 
 class Command(object):
     def __init__(self, cmd):
@@ -70,6 +82,7 @@ def comment_prompt(instance, include_solution=False):
     description = instance['text']
     test_example = instance['test_list'][0]
     prompt = f'"""\n{description}\n{test_example}\n"""\n'
+    #prompt = f'"""\n{description}\n"""\n'
 
     if include_solution:
         prompt += f"{instance['code']}\n"
@@ -221,7 +234,7 @@ def make_parser():
 
     parser.add_argument("--k_shot", type=int)
     parser.add_argument("--prompt_template", choices=["google", "comment"], default="comment")
-    parser.add_argument("--split", choices=["evaluation", "prompting", "training", "validation"], default="evaluation")
+    parser.add_argument("--split", choices=["evaluation", "prompting", "training", "validation", "sanitized"], default="evaluation")
     parser.add_argument("--n_examples", type=int)
 
     parser.add_argument("--git_status", action="store_true")
@@ -239,7 +252,10 @@ if __name__ == '__main__':
 
     random.seed(1)
 
-    dataset = MBPPDataset()
+    if args.split == 'sanitized':
+        dataset = SanitizedMBPPDataset()
+    else:
+        dataset = MBPPDataset()
 
     model = make_model(args)
     evaluate_code_generic(args, model)

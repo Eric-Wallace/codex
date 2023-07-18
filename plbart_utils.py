@@ -10,7 +10,6 @@ import io
 import tokenize
 
 from io import BytesIO
-from sacrebleu import tokenize_v14_international
 
 TOK_NO_SPACE_BEFORE = {',', ';'}
 
@@ -90,6 +89,7 @@ def process_string(tok, char2tok, tok2char, is_comment, do_whole_processing=True
         return tok
 
     tok = re.sub(" +", " ", tok)
+    from sacrebleu import tokenize_v14_international
     tok = tokenize_v14_international(tok)
     tok = re.sub(" +", " ", tok)
     tok = tok.replace("\r", "")

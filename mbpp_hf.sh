@@ -2,8 +2,9 @@
 model_name=$1
 shift
 
-# model="/checkpoint/dpf/models/${model_name}/checkpoint_last_consolidated.pt"
-model="/projects/tir3/users/dfried/code_models/models/cm-6B-armen/checkpoint_last_consolidated.pt"
+batch_size=10
+
+short_model_name=`basename $model_name`
 
 ncg=$1
 shift
@@ -22,15 +23,19 @@ else
   shift
 fi
 
-out_dir=expts/mbpp/${split}_${model_name}_last_pg_ncg-${ncg}_temp-${temperature}/${name}
+out_dir=expts/mbpp/${split}_${short_model_name}_last_pg_ncg-${ncg}_temp-${temperature}/${name}
 
 mkdir -p $out_dir
 
+export TOKENIZERS_PARALLELISM=false
+
 python -u mbpp.py \
+  --git_status \
+  --model_name $model_name \
   --split $split \
-  --model_name $model \
   --num_candidates_generated ${ncg} \
   --num_candidates_evaluated 1 \
+  --batch_size $batch_size \
   --temperature $temperature \
   --top_p 0.95 \
   --output_path $out_dir/outputs \

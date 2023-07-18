@@ -242,6 +242,7 @@ class Model:
 class HFModel(Model):
     def __init__(self, args, model_name, prompt_prefix=None, batch_size=None, check_low_prob_indices=None):
         super().__init__()
+        print("constructing HFModel")
         self.args = args
         self.prompt_prefix = prompt_prefix
         if 'gpt-j' in model_name:
@@ -256,7 +257,8 @@ class HFModel(Model):
             else:
                 self.lm_model = AutoModelForCausalLM.from_pretrained(model_name)
             self.lm_tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.lm_model.eval().half().cuda()
+        #self.lm_model.eval().half().cuda()
+        self.lm_model.eval().cuda()
         self.batch_size = batch_size
 
         self.check_low_prob_indices = check_low_prob_indices
@@ -289,10 +291,15 @@ class HFModel(Model):
     def encode_stop_words(self, stop_words: List[str]):
             return [self.lm_tokenizer.encode(string, add_special_tokens=False) for string in stop_words]
 
+    def encode(self, prompt):
+        return self.lm_tokenizer.batch_encode_plus(prompt, return_tensors="pt", padding=False)
+
+    def decode(self, seq):
+        return self.lm_tokenizer.decode(seq, skip_special_tokens=True)
+
     def complete(self, prompt, stop_words: List[str], sampling=True, max_tokens=DEFAULT_MAX_TOKENS, top_p=0.95, n=1, num_log_probs=1, temperature=0.6, beam=1):
         ''' This function runs GPT-2 locally using HF transformers but places the outputs into an json that looks just like the one
         provided by the OpenAI API. '''
-
         batch_size = n if self.batch_size is None else self.batch_size
 
         if beam != 1:
@@ -311,18 +318,22 @@ class HFModel(Model):
         # print(f"stop_words: {stop_words}")
         # print(f"encoded_stop_words: {encoded_stop_words}")
 
-        input_ids = self.lm_tokenizer.batch_encode_plus(prompt, return_tensors="pt", padding=False)
+        input_ids = self.encode(prompt)
         choices = []
         lm_model = self.lm_model
+        print("input ids:")
+        print(input_ids['input_ids'])
+        print()
         while len(choices) < n:
             num_to_sample = min(batch_size, n - len(choices))
             print(f"num_to_sample: {num_to_sample}")
+            input_length = len(input_ids['input_ids'][0])
             with torch.inference_mode():
                 # generate from the model
                 total_sequences = lm_model.generate(
                     input_ids=input_ids['input_ids'].cuda(),
                     attention_mask=input_ids['attention_mask'].cuda(),
-                    max_length=max_tokens + len(input_ids['input_ids'][0]),
+                    max_length=max_tokens + input_length,
                     do_sample=True,
                     num_return_sequences=num_to_sample,
                     top_p=top_p,
@@ -348,7 +359,7 @@ class HFModel(Model):
             # create the return value to resemble OpenAI
             return_json = {}
             for batch_id in range(num_to_sample):
-                seq = total_sequences[batch_id][-max_tokens:]
+                original_seq = seq = total_sequences[batch_id][-max_tokens:]
                 curr_json = {}
 
                 # package up top_log_probs and top_tokens
@@ -359,31 +370,37 @@ class HFModel(Model):
 
                 seq, _, zipped_lps = self._truncate_at_stop_words(stop_words, seq, zipped_lps)
 
-                # unpack
-                curr_top_log_probs, curr_top_tokens = zip(*zipped_lps)
-
-                # cutoff the -1 here because the probs are shifted one over for LMs
-                curr_top_log_probs = curr_top_log_probs[:-1]
-                curr_top_tokens = curr_top_tokens[:-1]
-
+                zipped_lps = list(zipped_lps)
                 # fill the return json with the top tokens and probs to match the OpenAI return value.
                 curr_json['logprobs'] = {}
                 curr_json['logprobs']['top_logprobs'] = []
                 curr_json['logprobs']['token_logprobs'] = []
                 curr_json['logprobs']['tokens'] = []
 
-                for current_element_top_log_probs, current_element_top_tokens in zip(curr_top_log_probs, curr_top_tokens):
-                    # tokens is a list of the top token at each position
-                    curr_json['logprobs']['tokens'].append(self.lm_tokenizer.decode([current_element_top_tokens[0]]))
-                    # token_logprobs is a list of the logprob of the top token at each position
-                    curr_json['logprobs']['token_logprobs'].append(current_element_top_log_probs[0].item())
-                    # top_logprobs is a list of dicts for the top K tokens. with each entry being {'token_name': log_prob}
-                    temp = {}
-                    for log_prob, token in zip(current_element_top_log_probs, current_element_top_tokens):
-                        temp[self.lm_tokenizer.decode(token.item())] = log_prob.item()
-                    curr_json['logprobs']['top_logprobs'].append(temp)
+                if not bool(zipped_lps):
+                    print(f'empty after stop word truncation:\nprompt:{prompt}\nseq:{self.lm_tokenizer.decode(original_seq)}')
+                    curr_top_log_probs, curr_top_tokens = [], []
+                    curr_json['text'] = ''
+                else:
+                    # unpack
+                    curr_top_log_probs, curr_top_tokens = zip(*zipped_lps)
 
-                curr_json['text'] = self.lm_tokenizer.decode(seq, skip_special_tokens=True)
+                    # cutoff the -1 here because the probs are shifted one over for LMs
+                    curr_top_log_probs = curr_top_log_probs[:-1]
+                    curr_top_tokens = curr_top_tokens[:-1]
+
+                    for current_element_top_log_probs, current_element_top_tokens in zip(curr_top_log_probs, curr_top_tokens):
+                        # tokens is a list of the top token at each position
+                        curr_json['logprobs']['tokens'].append(self.lm_tokenizer.decode([current_element_top_tokens[0]]))
+                        # token_logprobs is a list of the logprob of the top token at each position
+                        curr_json['logprobs']['token_logprobs'].append(current_element_top_log_probs[0].item())
+                        # top_logprobs is a list of dicts for the top K tokens. with each entry being {'token_name': log_prob}
+                        temp = {}
+                        for log_prob, token in zip(current_element_top_log_probs, current_element_top_tokens):
+                            temp[self.lm_tokenizer.decode(token.item())] = log_prob.item()
+                        curr_json['logprobs']['top_logprobs'].append(temp)
+
+                    curr_json['text'] = self.decode(seq)
 
                 choices.append(curr_json)
         return_json['choices'] = choices
@@ -608,6 +625,9 @@ class FairseqModel(Model):
                 assert isinstance(esw, list)
                 assert isinstance(esw[0], int)
                 encoded_stop_words.append(esw)
+        print("encoded_prompt:")
+        print(encoded_prompt)
+        print()
 
         num_yielded = 0
         while num_yielded < n:
@@ -1282,7 +1302,7 @@ def make_model(args, cached_model=None):
         return OpenAIModel(args, model_name, persistent=True)
     elif 'incoder' in model_name or '-hf' in model_name:
         return HFModel(args, model_name, prompt_prefix=prompt_prefix, batch_size=args.batch_size)
-    elif 'fairseq' in model_name or '/checkpoint' in model_name:
+    elif 'fairseq' in model_name or '/checkpoint' in model_name or '/project' in model_name:
         if "gpt2tok" in model_name:
             assert tokenizer_name == "gpt2"
         else:
